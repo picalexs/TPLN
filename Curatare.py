@@ -1,5 +1,6 @@
 import os
 import pandas as pd
+import re
 
 '''
 https://huggingface.co/datasets/avramandrei/rolargesum
@@ -33,6 +34,7 @@ def clean_text(text):
     text = str(text)
     text = text.lower()
     text = text.replace('\n', ' ')
+    text = re.sub(r'\s+', ' ', text).strip()
     return text
 
 train_df = pd.read_csv(train_path)
@@ -45,6 +47,10 @@ test_df["text"] = test_df["text"].apply(clean_text)
 # Scoatem texte goale daca exista
 train_df = train_df[train_df["text"].str.strip() != ""].copy()
 test_df = test_df[test_df["text"].str.strip() != ""].copy()
+
+# Scoatem duplicatele dupa text
+train_df = train_df.drop_duplicates(subset=["text"]).reset_index(drop=True)
+test_df = test_df.drop_duplicates(subset=["text"]).reset_index(drop=True)
 
 train_out = os.path.join(base_dir, "rolargesum_train_clean.csv")
 test_out = os.path.join(base_dir, "rolargesum_test_clean.csv")
