@@ -20,6 +20,7 @@ build/
 *.egg
 
 # Data & large generated files
+data/
 *.csv
 *.npy
 *.pkl
