@@ -1,12 +1,27 @@
+"""
+Data Cleaning
+===================================
+Downloads the RoLargeSum dataset from HuggingFace (first run only),
+caches it locally as a parquet file, then cleans the text and saves
+a processed CSV to data/.
+
+Outputs:
+    data/rolargesum_raw.parquet         (raw cache - skips HF API on re-run)
+    data/rolargesum_train_clean.csv     (cleaned dataset)
+"""
+
 import os
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+
 import pandas as pd
 import re
 
-from dotenv import load_dotenv
-from datasets import load_dataset
-from huggingface_hub import login
+base_dir = os.path.dirname(os.path.abspath(__file__))
+data_dir = os.path.join(base_dir, "data")
+os.makedirs(data_dir, exist_ok=True)
 
-load_dotenv()
+RAW_PARQUET = os.path.join(data_dir, "rolargesum_raw.parquet")
+CLEAN_CSV   = os.path.join(data_dir, "rolargesum_train_clean.csv")
 
 '''
 https://huggingface.co/datasets/avramandrei/rolargesum
@@ -25,20 +40,44 @@ Schema:
 }
 '''
 
-hf_token = os.environ.get("HF_TOKEN")
-if not hf_token:
-    raise EnvironmentError("HF_TOKEN not set in .env!")
-login(token=hf_token)
-dataset = load_dataset("avramandrei/rolargesum")
-print(dataset)
 
-# Folderul in care se afla scriptul
-base_dir = os.path.dirname(os.path.abspath(__file__))
+# LOAD DATASET (with local cache)
+if os.path.exists(RAW_PARQUET):
+    print(f"Loading dataset from local cache: {RAW_PARQUET}")
+    train_df = pd.read_parquet(RAW_PARQUET)
+    print(f"Loaded {len(train_df)} rows from cache.")
+else:
+    print("First run - downloading from HuggingFace...")
 
+    from dotenv import load_dotenv
+    from datasets import load_dataset
+    from huggingface_hub import login
+
+    load_dotenv()
+    hf_token = os.environ.get("HF_TOKEN")
+    if not hf_token:
+        raise EnvironmentError("HF_TOKEN not set!")
+
+    login(token=hf_token)
+    dataset = load_dataset("avramandrei/rolargesum")
+    print(dataset)
+    train_df = dataset["train"].to_pandas()
+
+    train_df.to_parquet(RAW_PARQUET, index=False)
+    print(f"Dataset cached at: {RAW_PARQUET} ({len(train_df)} rows)")
+
+print("Shape initial:", train_df.shape)
+print("Columns:", train_df.columns.tolist())
+print(train_df.head(3))
+
+
+# LOAD STOPWORDS
 stopwords_path = os.path.join(base_dir, "stopwords-ro.txt")
 with open(stopwords_path, "r", encoding="utf-8") as f:
     romanian_stopwords = {line.strip().lower() for line in f if line.strip()}
 
+
+# CLEANING FUNCTIONS
 def clean_text(text):
     if pd.isna(text):
         return ""
@@ -48,10 +87,12 @@ def clean_text(text):
     text = re.sub(r"\s+", " ", text).strip()
     return text
 
+
 def remove_stopwords(text):
     words = text.split()
     words = [word for word in words if word not in romanian_stopwords]
     return " ".join(words)
+
 
 def extract_date_from_url(url):
     if pd.isna(url):
@@ -64,65 +105,62 @@ def extract_date_from_url(url):
             f"{match.group(1)}-{match.group(2)}-{match.group(3)}",
             errors="coerce"
         )
-
     return pd.NaT
 
-train_df = dataset["train"].to_pandas()
 
-print("Shape initial:", train_df.shape)
-print("Coloane:", train_df.columns.tolist())
-print(train_df.head(3))
-
-# Curatare coloane text
-train_df["title"] = train_df["title"].apply(clean_text)
-train_df["text"] = train_df["text"].apply(clean_text)
-train_df["summary"] = train_df["summary"].apply(clean_text)
+# CLEAN ALL COLUMNS
+train_df["title"]    = train_df["title"].apply(clean_text)
+train_df["text"]     = train_df["text"].apply(clean_text)
+train_df["summary"]  = train_df["summary"].apply(clean_text)
 train_df["keywords"] = train_df["keywords"].apply(clean_text)
-train_df["topics"] = train_df["topics"].apply(clean_text)
-train_df["dialect"] = train_df["dialect"].apply(clean_text)
-train_df["url"] = train_df["url"].apply(clean_text)
-train_df["author"] = train_df["author"].apply(clean_text)
+train_df["topics"]   = train_df["topics"].apply(clean_text)
+train_df["dialect"]  = train_df["dialect"].apply(clean_text)
+train_df["url"]      = train_df["url"].apply(clean_text)
+train_df["author"]   = train_df["author"].apply(clean_text)
+
+# Extract timestamps from URLs
 train_df["timestamp"] = train_df["url"].apply(extract_date_from_url)
-print("\nValori timestamp lipsa:", train_df["timestamp"].isna().sum())
-print("Valori timestamp gasite:", train_df["timestamp"].notna().sum())
+print("\nTimestamp coverage:")
+print(f"  Found:   {train_df['timestamp'].notna().sum()}")
+print(f"  Missing: {train_df['timestamp'].isna().sum()}")
 print(train_df[["url", "timestamp"]].head(10))
-
-print(train_df[["title", "text", "summary", "keywords"]].head(3))
-
-print("Shape inainte de filtrare:", train_df.shape)
 
 # Construire documente
 train_df["document"] = train_df["title"] + ". " + train_df["text"]
 train_df["document"] = train_df["document"].apply(clean_text)
 
+# Short document = title + first 500 chars of text
 train_df["short_document"] = train_df["title"] + ". " + train_df["text"].str.slice(0, 500)
 train_df["short_document"] = train_df["short_document"].apply(clean_text)
 
-# Eliminare randuri problematice
+
+# FILTER
+print("\nShape before filtering:", train_df.shape)
+
+# Remove empty titles/documents
 train_df = train_df[train_df["title"].str.strip() != ""].copy()
 train_df = train_df[train_df["document"].str.strip() != ""].copy()
 
-# Eliminare duplicate
+# Remove exact duplicates
 train_df = train_df.drop_duplicates(subset=["document"]).reset_index(drop=True)
 
-# Varianta fara stopwords - utila doar pentru baseline / TF-IDF
+# Stopword-free version (for TF-IDF baseline)
 train_df["document_nostop"] = train_df["document"].apply(remove_stopwords)
 
-print("Shape dupa filtrare:", train_df.shape)
-print(train_df[["title", "document", "document_nostop"]].head(3))
+print("Shape after filtering:", train_df.shape)
 
-print("\nValori lipsa pe coloane:")
+
+# STATS
+print("\nMissing values per column:")
 print(train_df.isna().sum())
 
-print("\nTop valori in topics:")
+print("\nTop topic values:")
 print(train_df["topics"].value_counts(dropna=False).head(20))
 
-print("\nValori in dialect:")
+print("\nDialect values:")
 print(train_df["dialect"].value_counts(dropna=False))
 
-print(train_df[["document", "document_nostop"]].head(3))
-
-# Pastrez coloanele importante
+# SAVE
 train_df = train_df[[
     "title",
     "text",
@@ -138,8 +176,7 @@ train_df = train_df[[
     "timestamp"
 ]].copy()
 
-clean_path = os.path.join(base_dir, "rolargesum_train_clean.csv")
-train_df.to_csv(clean_path, index=False)
+train_df.to_csv(CLEAN_CSV, index=False)
 
-print("\nShape final:", train_df.shape)
-print("Fisier salvat la:", clean_path)
+print(f"\nShape final: {train_df.shape}")
+print(f"Saved to: {CLEAN_CSV}")

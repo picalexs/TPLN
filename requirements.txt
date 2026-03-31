@@ -1,0 +1,26 @@
+# Core
+pandas
+numpy
+python-dotenv
+pyarrow
+
+# HuggingFace
+datasets
+huggingface_hub
+
+# Embeddings & similarity
+sentence-transformers
+faiss-cpu
+
+# Dimensionality reduction & clustering
+umap-learn
+hdbscan
+scikit-learn
+
+# Temporal / burst detection
+# (manual implementation included, but library available if needed)
+# burst-detection
+
+# Visualisation & dashboard
+plotly
+streamlit
