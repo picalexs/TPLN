@@ -2,8 +2,11 @@ import os
 import pandas as pd
 import re
 
+from dotenv import load_dotenv
 from datasets import load_dataset
 from huggingface_hub import login
+
+load_dotenv()
 
 '''
 https://huggingface.co/datasets/avramandrei/rolargesum
@@ -22,7 +25,10 @@ Schema:
 }
 '''
 
-login(token="REMOVED_API_TOKEN")  # TOKEN DE ACCES: NU MODIFICATI
+hf_token = os.environ.get("HF_TOKEN")
+if not hf_token:
+    raise EnvironmentError("HF_TOKEN not set in .env!")
+login(token=hf_token)
 dataset = load_dataset("avramandrei/rolargesum")
 print(dataset)
 
