@@ -1,6 +1,25 @@
+"""
+Embedding Generation, FAISS Indexing & HDBSCAN Clustering
+=======================================================================
+Reads the cleaned CSV, generates Sentence-BERT embeddings
+(with caching), indexes with FAISS, reduces with UMAP, and clusters
+with HDBSCAN. Saves all artefacts to data/ subdirectories.
+
+Outputs:
+    data/embeddings/{topic}_embeddings.npy     per-topic raw embeddings
+    data/umap/{topic}_umap15d.npy              15-D UMAP (for clustering)
+    data/umap/{topic}_umap2d.npy               2-D UMAP (for dashboard scatter)
+    data/faiss/{topic}.faiss                   FAISS index per topic
+    data/clusters/clustered_data.csv           main labelled dataset
+    data/clusters/hdbscan_config_results.csv   config sweep results
+"""
+
 import os
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+
 import pandas as pd
 import numpy as np
+import unicodedata
 
 from sentence_transformers import SentenceTransformer
 import faiss
@@ -9,59 +28,81 @@ import umap
 
 from sklearn.metrics import silhouette_score
 
-# Instalare:
-# python -m pip install sentence-transformers faiss-cpu hdbscan umap-learn scikit-learn
-
-# Folder curent
+# ---------------------------------------------------------------------------
+# PATHS & CONFIG
+# ---------------------------------------------------------------------------
 base_dir = os.path.dirname(os.path.abspath(__file__))
+data_dir = os.path.join(base_dir, "data")
 
-# Fisier curatat
-input_path = os.path.join(base_dir, "rolargesum_train_clean.csv")
+INPUT_CSV = os.path.join(data_dir, "rolargesum_train_clean.csv")
 
-# Numar maxim de linii
-MAX_ROWS = 15000
+EMB_DIR     = os.path.join(data_dir, "embeddings")
+UMAP_DIR    = os.path.join(data_dir, "umap")
+FAISS_DIR   = os.path.join(data_dir, "faiss")
+CLUSTER_DIR = os.path.join(data_dir, "clusters")
 
-# Coloana folosita pentru embeddings
-TEXT_COLUMN = "title"
+for d in [EMB_DIR, UMAP_DIR, FAISS_DIR, CLUSTER_DIR]:
+    os.makedirs(d, exist_ok=True)
 
-# Topicurile sub acest prag merg direct in noise
-MIN_TOPIC_SIZE = 200
+MAX_ROWS = 15000                    # max rows to process (set to None for all)
+TEXT_COLUMN = "short_document"      # FIX: use title+body instead of title only
+MIN_TOPIC_SIZE = 200                # topics smaller than this go to noise
 
-# Citire date
-df = pd.read_csv(input_path, nrows=MAX_ROWS)
+
+# ---------------------------------------------------------------------------
+# UTILITY: strip diacritics
+# ---------------------------------------------------------------------------
+def strip_diacritics(text):
+    """Remove Romanian diacritics: ă→a, î→i, â→a, ș→s, ț→t"""
+    nfkd = unicodedata.normalize("NFKD", text)
+    return "".join(c for c in nfkd if not unicodedata.combining(c))
+
+
+# ---------------------------------------------------------------------------
+# LOAD DATA
+# ---------------------------------------------------------------------------
+if not os.path.exists(INPUT_CSV):
+    raise FileNotFoundError(
+        f"Cleaned CSV not found at {INPUT_CSV}.\n"
+        "Run Curatare.py first."
+    )
+
+df = pd.read_csv(INPUT_CSV, nrows=MAX_ROWS)
 
 print("Shape initial:", df.shape)
 print("Coloane:", df.columns.tolist())
-print(df[["title", "topics", "document"]].head(3))
 
-# Curatare minima dupa citire
-df["title"] = df["title"].fillna("").astype(str)
-df["document"] = df["document"].fillna("").astype(str)
+# Minimal cleanup after CSV read
+df["title"]          = df["title"].fillna("").astype(str)
+df["document"]       = df["document"].fillna("").astype(str)
 df["short_document"] = df["short_document"].fillna("").astype(str)
-df["topics"] = df["topics"].fillna("").astype(str)
+df["topics"]         = df["topics"].fillna("").astype(str)
 
-# Eliminare randuri fara titlu sau document
+# Remove empty rows
 df = df[df["title"].str.strip() != ""].copy().reset_index(drop=True)
 df = df[df["document"].str.strip() != ""].copy().reset_index(drop=True)
 
-print("Shape dupa eliminarea documentelor/titlurilor goale:", df.shape)
+print("Shape after removing empty rows:", df.shape)
 
 
-# =========================
-# 1. NORMALIZARE TOPICS
-# =========================
+# ===========================================================================
+# 1. NORMALIZE TOPICS — FIX: strip diacritics before mapping
+# ===========================================================================
 def normalize_topic(topic: str) -> str:
     topic = str(topic).strip().lower()
+    # Strip diacritics so "politică" becomes "politica", "cultură" becomes "cultura"
+    topic_ascii = strip_diacritics(topic)
 
     mapping = {
         "politic": "politica",
-        "politică": "politica",
         "politica": "politica",
         "guvern": "politica",
 
         "externe": "international",
+        "extern": "international",
         "international": "international",
         "stiri-externe": "international",
+        "razboi": "international",
 
         "economie": "economie",
         "economic": "economie",
@@ -89,137 +130,155 @@ def normalize_topic(topic: str) -> str:
         "stiri-diverse": "diverse",
 
         "cultura": "cultura",
-        "cultură": "cultura",
-
-        "razboi": "international"
     }
 
-    return mapping.get(topic, topic if topic != "" else "necunoscut")
+    # Try ASCII version first (handles politică→politica, cultură→cultura)
+    if topic_ascii in mapping:
+        return mapping[topic_ascii]
+    # Then try original
+    if topic in mapping:
+        return mapping[topic]
+
+    return topic if topic != "" else "necunoscut"
 
 
-# Topic normalizat
 df["topic_group"] = df["topics"].apply(normalize_topic)
 
-print("\nDistributia topic_group:")
+print("\nDistribution of topic_group:")
 print(df["topic_group"].value_counts().head(20))
 
 
-# =========================
-# 2. MODEL EMBEDDINGS
-# =========================
-print(f"\nReprezentare folosita pentru embeddings: {TEXT_COLUMN}")
-print("\nIncarc modelul SentenceTransformer...")
+# ===========================================================================
+# 2. SENTENCE-BERT MODEL
+# ===========================================================================
+print(f"\nText column for embeddings: {TEXT_COLUMN}")
+print("Loading SentenceTransformer model...")
 
 model = SentenceTransformer("sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
 
 
-# =========================
-# 3. CONFIGURATII DE BAZA
-# =========================
+# ===========================================================================
+# 3. HDBSCAN CONFIG SWEEP
+# ===========================================================================
 default_configs = [
-    {"min_cluster_size": 8, "min_samples": 3},
+    {"min_cluster_size": 8,  "min_samples": 3},
     {"min_cluster_size": 10, "min_samples": 4},
     {"min_cluster_size": 12, "min_samples": 6},
     {"min_cluster_size": 15, "min_samples": 8},
 ]
 
-# Rezultate pentru raport
 all_results = []
-
-# Bucati finale care vor fi unite
 final_chunks = []
-
-# Offset pentru clustere globale unice
 global_cluster_offset = 0
 
-# Topicuri suficient de mari
 topic_counts = df["topic_group"].value_counts()
 eligible_topics = topic_counts[topic_counts >= MIN_TOPIC_SIZE].index.tolist()
 
-print("\nTopicuri eligibile pentru clusterizare:")
+print("\nEligible topics for clustering:")
 print(topic_counts[topic_counts >= MIN_TOPIC_SIZE])
 
 
-# =========================
-# 4. CLUSTERIZARE PE TOPIC
-# =========================
+# ===========================================================================
+# 4. CLUSTER PER TOPIC
+# ===========================================================================
 for topic_name in eligible_topics:
+    safe_topic = topic_name.replace("/", "_").replace(" ", "_")
+
     print("\n" + "=" * 60)
     print(f"TOPIC_GROUP: {topic_name}")
     print("=" * 60)
 
-    # Subset pe topic
     df_topic = df[df["topic_group"] == topic_name].copy().reset_index(drop=True)
+    print(f"Articles in topic: {len(df_topic)}")
 
-    print("Numar articole in topic:", len(df_topic))
-
-    # Alegere text pentru embeddings
     documents = df_topic[TEXT_COLUMN].tolist()
 
-    # Embeddings
-    print("Generez embeddings...")
-    embeddings = model.encode(
-        documents,
-        batch_size=32,
-        show_progress_bar=True,
-        convert_to_numpy=True,
-        normalize_embeddings=True
-    )
+    # ---- EMBEDDINGS (with caching) ----
+    emb_path = os.path.join(EMB_DIR, f"{safe_topic}_embeddings.npy")
 
-    print("Embeddings shape:", embeddings.shape)
+    if os.path.exists(emb_path):
+        print(f"Loading cached embeddings from {emb_path}...")
+        embeddings = np.load(emb_path)
+        if embeddings.shape[0] != len(df_topic):
+            print(f"  Cache mismatch ({embeddings.shape[0]} vs {len(df_topic)}), regenerating...")
+            embeddings = model.encode(
+                documents, batch_size=32, show_progress_bar=True,
+                convert_to_numpy=True, normalize_embeddings=True
+            )
+            np.save(emb_path, embeddings)
+    else:
+        print("Generating embeddings...")
+        embeddings = model.encode(
+            documents, batch_size=32, show_progress_bar=True,
+            convert_to_numpy=True, normalize_embeddings=True
+        )
+        np.save(emb_path, embeddings)
 
-    # Salvare embeddings pe topic
-    safe_topic = topic_name.replace("/", "_").replace(" ", "_")
-    embeddings_path = os.path.join(
-        base_dir,
-        f"rolargesum_embeddings_{TEXT_COLUMN}_{safe_topic}_{len(df_topic)}.npy"
-    )
-    np.save(embeddings_path, embeddings)
+    print(f"Embeddings shape: {embeddings.shape}")
 
-    # FAISS
-    print("Construiesc indexul FAISS...")
+    # ---- FAISS INDEX (save to disk) ----
+    print("Building FAISS index...")
     dimension = embeddings.shape[1]
     index = faiss.IndexFlatIP(dimension)
     index.add(embeddings)
+    print(f"Vectors indexed: {index.ntotal}")
 
-    print("Numar vectori indexati:", index.ntotal)
+    faiss_path = os.path.join(FAISS_DIR, f"{safe_topic}.faiss")
+    faiss.write_index(index, faiss_path)
+    print(f"FAISS index saved to: {faiss_path}")
 
-    # Vecini apropiati pentru verificare
+    # Quick nearest-neighbor check
     k = 5
     distances, indices = index.search(embeddings[:3], k)
-
-    print("\nExemple vecini apropiati:")
+    print("\nNearest neighbor examples:")
     for i in range(min(3, len(df_topic))):
-        print(f"\nDocument {i}:")
-        print("Titlu:", str(df_topic.iloc[i]["title"]))
+        print(f"\n  Document {i}: {str(df_topic.iloc[i]['title'])[:80]}")
         for rank, idx in enumerate(indices[i]):
             print(
-                f"  Vecin {rank}: idx={idx}, scor={distances[i][rank]:.4f}, titlu={str(df_topic.iloc[idx]['title'])}"
+                f"    Neighbor {rank}: idx={idx}, score={distances[i][rank]:.4f}, "
+                f"title={str(df_topic.iloc[idx]['title'])[:60]}"
             )
 
-    # UMAP
-    print("\nReduc dimensionalitatea cu UMAP...")
-    reducer = umap.UMAP(
-        n_neighbors=30,
-        n_components=15,
-        metric="cosine",
-        random_state=42
-    )
+    # ---- UMAP 15-D (for clustering) - with caching ----
+    umap15d_path = os.path.join(UMAP_DIR, f"{safe_topic}_umap15d.npy")
 
-    embeddings_reduced = reducer.fit_transform(embeddings)
-    print("Shape dupa UMAP:", embeddings_reduced.shape)
+    if os.path.exists(umap15d_path):
+        print(f"\nLoading cached UMAP 15-D from {umap15d_path}...")
+        embeddings_reduced = np.load(umap15d_path)
+        if embeddings_reduced.shape[0] != len(df_topic):
+            print(f"  Cache mismatch, regenerating...")
+            reducer = umap.UMAP(n_neighbors=30, n_components=15, metric="cosine", random_state=42)
+            embeddings_reduced = reducer.fit_transform(embeddings)
+            np.save(umap15d_path, embeddings_reduced)
+    else:
+        print("\nReducing dimensions with UMAP (15-D for clustering)...")
+        reducer = umap.UMAP(n_neighbors=30, n_components=15, metric="cosine", random_state=42)
+        embeddings_reduced = reducer.fit_transform(embeddings)
+        np.save(umap15d_path, embeddings_reduced)
 
-    # Salvare embeddings reduse
-    reduced_path = os.path.join(
-        base_dir,
-        f"rolargesum_umap_{TEXT_COLUMN}_{safe_topic}_{len(df_topic)}.npy"
-    )
-    np.save(reduced_path, embeddings_reduced)
+    print(f"UMAP 15-D shape: {embeddings_reduced.shape}")
 
-    # Configuratii specifice pe topic
+    # ---- UMAP 2-D (for dashboard scatter) - with caching ----
+    umap2d_path = os.path.join(UMAP_DIR, f"{safe_topic}_umap2d.npy")
+
+    if os.path.exists(umap2d_path):
+        print(f"Loading cached UMAP 2-D from {umap2d_path}...")
+        embeddings_2d = np.load(umap2d_path)
+        if embeddings_2d.shape[0] != len(df_topic):
+            print(f"  Cache mismatch, regenerating...")
+            reducer_2d = umap.UMAP(n_neighbors=30, n_components=2, metric="cosine", random_state=42)
+            embeddings_2d = reducer_2d.fit_transform(embeddings)
+            np.save(umap2d_path, embeddings_2d)
+    else:
+        print("Reducing dimensions with UMAP (2-D for visualization)...")
+        reducer_2d = umap.UMAP(n_neighbors=30, n_components=2, metric="cosine", random_state=42)
+        embeddings_2d = reducer_2d.fit_transform(embeddings)
+        np.save(umap2d_path, embeddings_2d)
+
+    print(f"UMAP 2-D shape: {embeddings_2d.shape}")
+
+    # ---- HDBSCAN CONFIG SWEEP ----
     topic_specific_configs = default_configs
-
-    # Pentru politica, fortez variante mai stricte
     if topic_name == "politica":
         topic_specific_configs = [
             {"min_cluster_size": 10, "min_samples": 4},
@@ -229,9 +288,9 @@ for topic_name in eligible_topics:
 
     best_result = None
 
-    print("\nTestez configuratii HDBSCAN...")
+    print("\nTesting HDBSCAN configs...")
     for cfg in topic_specific_configs:
-        print(f"\nConfig testata: {cfg}")
+        print(f"\n  Config: {cfg}")
 
         clusterer = hdbscan.HDBSCAN(
             min_cluster_size=cfg["min_cluster_size"],
@@ -239,102 +298,69 @@ for topic_name in eligible_topics:
             metric="euclidean",
             prediction_data=True
         )
-
         labels = clusterer.fit_predict(embeddings_reduced)
 
-        # Numar clustere reale
         num_clusters = len(set(labels)) - (1 if -1 in labels else 0)
-
-        # Numar noise
         num_noise = int((labels == -1).sum())
         noise_percent = 100 * num_noise / len(labels)
 
-        # Cel mai mare cluster real
         real_cluster_counts = pd.Series(labels[labels != -1]).value_counts()
-        largest_real_cluster = int(real_cluster_counts.iloc[0]) if not real_cluster_counts.empty else 0
+        largest_real = int(real_cluster_counts.iloc[0]) if not real_cluster_counts.empty else 0
 
-        # Silhouette doar pe non-noise
+        # Silhouette on non-noise
         sil_score = None
         mask = labels != -1
         if mask.sum() > 1 and len(set(labels[mask])) > 1:
             try:
                 sil_score = silhouette_score(
-                    embeddings_reduced[mask],
-                    labels[mask],
-                    metric="euclidean"
+                    embeddings_reduced[mask], labels[mask], metric="euclidean"
                 )
             except Exception:
                 sil_score = None
 
-        print("Numar clustere:", num_clusters)
-        print("Noise:", num_noise, f"({noise_percent:.2f}%)")
-        print("Cel mai mare cluster real:", largest_real_cluster)
-        print("Silhouette:", sil_score)
+        print(f"    Clusters: {num_clusters}, Noise: {num_noise} ({noise_percent:.1f}%), "
+              f"Largest: {largest_real}, Silhouette: {sil_score}")
 
-        # Penalizare pentru cluster dominant
-        penalty = largest_real_cluster / len(labels)
-
-        # Bonus pentru silhouette
+        penalty = largest_real / len(labels)
         sil_bonus = sil_score * 20 if sil_score is not None else 0
-
-        # Bonus mic pentru numar bun de clustere
         cluster_bonus = min(num_clusters, 100) / 10
 
-        # Pentru topicuri mici, pun mai mult accent pe coeziune
         if len(df_topic) < 1000:
             selection_score = (100 - noise_percent) - (penalty * 120) + (sil_bonus * 1.5) + cluster_bonus
         else:
             selection_score = (100 - noise_percent) - (penalty * 150) + sil_bonus + cluster_bonus
 
-        # Prea putine clustere = penalizare
         if num_clusters < 3:
             selection_score -= 100
 
         result = {
-            "cfg": cfg,
-            "labels": labels,
-            "num_clusters": num_clusters,
-            "num_noise": num_noise,
-            "noise_percent": noise_percent,
-            "largest_real_cluster": largest_real_cluster,
-            "silhouette": sil_score,
-            "selection_score": selection_score,
+            "cfg": cfg, "labels": labels,
+            "num_clusters": num_clusters, "num_noise": num_noise,
+            "noise_percent": noise_percent, "largest_real_cluster": largest_real,
+            "silhouette": sil_score, "selection_score": selection_score,
         }
 
-        # Salvare pentru raport
         all_results.append({
-            "topic_group": topic_name,
-            "topic_size": len(df_topic),
+            "topic_group": topic_name, "topic_size": len(df_topic),
             "min_cluster_size": cfg["min_cluster_size"],
             "min_samples": cfg["min_samples"],
-            "num_clusters": num_clusters,
-            "num_noise": num_noise,
-            "noise_percent": noise_percent,
-            "largest_real_cluster": largest_real_cluster,
-            "silhouette": sil_score,
-            "selection_score": selection_score
+            "num_clusters": num_clusters, "num_noise": num_noise,
+            "noise_percent": noise_percent, "largest_real_cluster": largest_real,
+            "silhouette": sil_score, "selection_score": selection_score,
         })
 
-        # Pastram configuratia cea mai buna
         if best_result is None or result["selection_score"] > best_result["selection_score"]:
             best_result = result
 
-    print("\nConfiguratia aleasa pentru topic:", topic_name)
-    print(best_result["cfg"])
-    print("Numar clustere:", best_result["num_clusters"])
-    print("Numar puncte noise:", best_result["num_noise"])
-    print("Procent noise:", round(best_result["noise_percent"], 2), "%")
-    print("Cel mai mare cluster real:", best_result["largest_real_cluster"])
-    print("Silhouette:", best_result["silhouette"])
+    print(f"\nBest config for {topic_name}: {best_result['cfg']}")
+    print(f"  Clusters: {best_result['num_clusters']}, "
+          f"Noise: {best_result['num_noise']} ({best_result['noise_percent']:.1f}%), "
+          f"Silhouette: {best_result['silhouette']}")
 
-    # Salvam parametrii alesi
     df_topic["best_min_cluster_size"] = best_result["cfg"]["min_cluster_size"]
     df_topic["best_min_samples"] = best_result["cfg"]["min_samples"]
 
-    # Labeluri locale
     local_labels = best_result["labels"]
-
-    # Transformare in labeluri globale unice
     global_labels = []
     for lbl in local_labels:
         if lbl == -1:
@@ -343,94 +369,82 @@ for topic_name in eligible_topics:
             global_labels.append(lbl + global_cluster_offset)
 
     df_topic["cluster"] = global_labels
+    df_topic["umap_x"] = embeddings_2d[:, 0]
+    df_topic["umap_y"] = embeddings_2d[:, 1]
 
-    # Crestere offset pentru topicul urmator
     real_local_clusters = len(set(local_labels)) - (1 if -1 in local_labels else 0)
     if real_local_clusters > 0:
         global_cluster_offset += real_local_clusters
 
-    # Adaugam rezultatul topicului
     final_chunks.append(df_topic)
 
 
-# Topicurile prea mici merg in noise
+# Small topics go to noise
 small_topics_df = df[~df["topic_group"].isin(eligible_topics)].copy()
 if not small_topics_df.empty:
     small_topics_df["best_min_cluster_size"] = np.nan
     small_topics_df["best_min_samples"] = np.nan
     small_topics_df["cluster"] = -1
+    small_topics_df["umap_x"] = np.nan
+    small_topics_df["umap_y"] = np.nan
     final_chunks.append(small_topics_df)
 
 
-# =========================
-# 5. REZULTAT FINAL GLOBAL
-# =========================
+# ===========================================================================
+# 5. GLOBAL RESULTS
+# ===========================================================================
 final_df = pd.concat(final_chunks, ignore_index=True)
 
-# Marime cluster pentru fiecare rand
 cluster_sizes = final_df["cluster"].value_counts().to_dict()
 final_df["cluster_size"] = final_df["cluster"].map(cluster_sizes)
 
 print("\n" + "=" * 60)
-print("REZULTAT FINAL GLOBAL")
+print("GLOBAL RESULTS")
 print("=" * 60)
 
-# Statistici globale
 num_clusters_global = len(set(final_df["cluster"])) - (1 if -1 in final_df["cluster"].values else 0)
 num_noise_global = int((final_df["cluster"] == -1).sum())
-noise_percent_global = 100 * num_noise_global / len(final_df)
+noise_pct_global = 100 * num_noise_global / len(final_df)
 
-print("Numar clustere globale:", num_clusters_global)
-print("Numar puncte noise globale:", num_noise_global)
-print("Procent noise global:", round(noise_percent_global, 2), "%")
-
-print("\nDistributia clusterelor globale:")
+print(f"Global clusters:  {num_clusters_global}")
+print(f"Global noise:     {num_noise_global} ({noise_pct_global:.1f}%)")
+print(f"\nCluster distribution (top 20):")
 print(final_df["cluster"].value_counts().head(20))
 
-# Top clustere reale
-top_real_clusters = final_df[final_df["cluster"] != -1]["cluster"].value_counts().head(10)
-print("\nTop clustere reale globale:")
-print(top_real_clusters)
+top_real = final_df[final_df["cluster"] != -1]["cluster"].value_counts().head(10)
+print(f"\nTop real clusters:")
+print(top_real)
 
-# Inspectare cluster global mare
 cluster_counts = final_df[final_df["cluster"] != -1]["cluster"].value_counts()
 if not cluster_counts.empty:
-    largest_cluster = cluster_counts.idxmax()
-    print("\nCel mai mare cluster real global este:", largest_cluster)
+    largest = cluster_counts.idxmax()
+    print(f"\nLargest cluster ({largest}) - sample titles:")
+    for _, row in final_df[final_df["cluster"] == largest].head(10).iterrows():
+        print(f"  - {str(row['title'])[:100]}")
 
-    subset_big = final_df[final_df["cluster"] == largest_cluster].head(20)
-    for _, row in subset_big.iterrows():
-        print("-", str(row["title"]))
-else:
-    print("\nNu exista clustere reale diferite de -1.")
-
-# Exemple din primele clustere globale
-print("\nExemple din primele clustere globale:")
+print("\nSample from first 5 clusters:")
 shown = 0
-for cluster_id in sorted(final_df["cluster"].unique()):
-    if cluster_id == -1:
+for cid in sorted(final_df["cluster"].unique()):
+    if cid == -1:
         continue
-
-    subset = final_df[final_df["cluster"] == cluster_id].head(5)
-    print(f"\n=== Cluster global {cluster_id} ===")
+    subset = final_df[final_df["cluster"] == cid].head(5)
+    print(f"\n  === Cluster {cid} ===")
     for _, row in subset.iterrows():
-        print("-", str(row["title"]))
-
+        print(f"    - {str(row['title'])[:100]}")
     shown += 1
     if shown >= 5:
         break
 
 
-# =========================
-# 6. SALVARE REZULTATE
-# =========================
+# ===========================================================================
+# 6. SAVE
+# ===========================================================================
 results_df = pd.DataFrame(all_results)
-results_path = os.path.join(base_dir, f"hdbscan_results_by_topic_{TEXT_COLUMN}_{MAX_ROWS}.csv")
+results_path = os.path.join(CLUSTER_DIR, "hdbscan_config_results.csv")
 results_df.to_csv(results_path, index=False)
-print("\nRezultatele configuratiilor salvate la:", results_path)
+print(f"\nConfig results saved to: {results_path}")
 
-output_path = os.path.join(base_dir, f"rolargesum_with_clusters_by_topic_{TEXT_COLUMN}_{MAX_ROWS}.csv")
+output_path = os.path.join(CLUSTER_DIR, "clustered_data.csv")
 final_df.to_csv(output_path, index=False)
-
-print("Fisier salvat la:", output_path)
-print("Shape final:", final_df.shape)
+print(f"Clustered data saved to: {output_path}")
+print(f"Final shape: {final_df.shape}")
