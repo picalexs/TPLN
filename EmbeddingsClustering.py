@@ -19,154 +19,68 @@ os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 
 import pandas as pd
 import numpy as np
-import unicodedata
 
 from sentence_transformers import SentenceTransformer
 import faiss
 import hdbscan
 import umap
-
 from sklearn.metrics import silhouette_score
 
-# ---------------------------------------------------------------------------
-# PATHS & CONFIG
-# ---------------------------------------------------------------------------
-base_dir = os.path.dirname(os.path.abspath(__file__))
-data_dir = os.path.join(base_dir, "data")
-
-INPUT_CSV = os.path.join(data_dir, "rolargesum_train_clean.csv")
-
-EMB_DIR     = os.path.join(data_dir, "embeddings")
-UMAP_DIR    = os.path.join(data_dir, "umap")
-FAISS_DIR   = os.path.join(data_dir, "faiss")
-CLUSTER_DIR = os.path.join(data_dir, "clusters")
-
-for d in [EMB_DIR, UMAP_DIR, FAISS_DIR, CLUSTER_DIR]:
-    os.makedirs(d, exist_ok=True)
-
-MAX_ROWS = 15000                    # max rows to process (set to None for all)
-TEXT_COLUMN = "short_document"      # FIX: use title+body instead of title only
-MIN_TOPIC_SIZE = 200                # topics smaller than this go to noise
+from src.config import (
+    SBERT_MODEL, TEXT_COLUMN, MIN_TOPIC_SIZE,
+    MAX_ROWS, HDBSCAN_DEFAULT_CONFIGS, HDBSCAN_TOPIC_CONFIGS
+)
+from src.paths import (
+    INPUT_CSV, EMB_DIR, UMAP_DIR, FAISS_DIR, CLUSTER_DIR
+)
+from src.io_utils import load_clean_csv
+from src.topic_mapping import normalize_topic
 
 
-# ---------------------------------------------------------------------------
-# UTILITY: strip diacritics
-# ---------------------------------------------------------------------------
-def strip_diacritics(text):
-    """Remove Romanian diacritics: ă→a, î→i, â→a, ș→s, ț→t"""
-    nfkd = unicodedata.normalize("NFKD", text)
-    return "".join(c for c in nfkd if not unicodedata.combining(c))
 
 
-# ---------------------------------------------------------------------------
-# LOAD DATA
-# ---------------------------------------------------------------------------
+# =========================================================================
+# LOAD DATA (assumes already cleaned by DataCuration.py)
+# =========================================================================
 if not os.path.exists(INPUT_CSV):
     raise FileNotFoundError(
         f"Cleaned CSV not found at {INPUT_CSV}.\n"
-        "Run Curatare.py first."
+        "Run DataCuration.py first."
     )
 
-df = pd.read_csv(INPUT_CSV, nrows=MAX_ROWS)
+df = load_clean_csv(nrows=MAX_ROWS)
 
 print("Shape initial:", df.shape)
-print("Coloane:", df.columns.tolist())
+print("Columns:", df.columns.tolist())
 
-# Minimal cleanup after CSV read
-df["title"]          = df["title"].fillna("").astype(str)
-df["document"]       = df["document"].fillna("").astype(str)
-df["short_document"] = df["short_document"].fillna("").astype(str)
-df["topics"]         = df["topics"].fillna("").astype(str)
-
-# Remove empty rows
-df = df[df["title"].str.strip() != ""].copy().reset_index(drop=True)
-df = df[df["document"].str.strip() != ""].copy().reset_index(drop=True)
-
-print("Shape after removing empty rows:", df.shape)
+# No re-cleaning; data is already clean from DataCuration.py
+# Just ensure required columns exist
+for col in ["title", "document", "short_document", "topics"]:
+    if col not in df.columns:
+        raise ValueError(f"Required column '{col}' not found in DataFrame")
 
 
-# ===========================================================================
-# 1. NORMALIZE TOPICS — FIX: strip diacritics before mapping
-# ===========================================================================
-def normalize_topic(topic: str) -> str:
-    topic = str(topic).strip().lower()
-    # Strip diacritics so "politică" becomes "politica", "cultură" becomes "cultura"
-    topic_ascii = strip_diacritics(topic)
-
-    mapping = {
-        "politic": "politica",
-        "politica": "politica",
-        "guvern": "politica",
-
-        "externe": "international",
-        "extern": "international",
-        "international": "international",
-        "stiri-externe": "international",
-        "razboi": "international",
-
-        "economie": "economie",
-        "economic": "economie",
-        "financiar": "economie",
-        "stiri-economice": "economie",
-        "bani": "economie",
-
-        "social": "social",
-        "societate": "social",
-        "stiri-sociale": "social",
-        "viata": "social",
-
-        "justitie": "justitie",
-        "stiri-justitie": "justitie",
-
-        "sanatate": "sanatate",
-        "sport": "sport",
-        "educatie": "educatie",
-
-        "stiinta": "stiinta",
-        "it-stiinta": "stiinta",
-        "tehnologie": "stiinta",
-
-        "diverse": "diverse",
-        "stiri-diverse": "diverse",
-
-        "cultura": "cultura",
-    }
-
-    # Try ASCII version first (handles politică→politica, cultură→cultura)
-    if topic_ascii in mapping:
-        return mapping[topic_ascii]
-    # Then try original
-    if topic in mapping:
-        return mapping[topic]
-
-    return topic if topic != "" else "necunoscut"
-
-
+# =========================================================================
+# NORMALIZE TOPICS
+# =========================================================================
 df["topic_group"] = df["topics"].apply(normalize_topic)
 
 print("\nDistribution of topic_group:")
 print(df["topic_group"].value_counts().head(20))
 
 
-# ===========================================================================
-# 2. SENTENCE-BERT MODEL
-# ===========================================================================
+# =========================================================================
+# LOAD SBERT MODEL
+# =========================================================================
 print(f"\nText column for embeddings: {TEXT_COLUMN}")
-print("Loading SentenceTransformer model...")
+print(f"Loading SentenceTransformer model: {SBERT_MODEL}...")
 
-model = SentenceTransformer("sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
+model = SentenceTransformer(SBERT_MODEL)
 
 
-# ===========================================================================
-# 3. HDBSCAN CONFIG SWEEP
-# ===========================================================================
-default_configs = [
-    {"min_cluster_size": 8,  "min_samples": 3},
-    {"min_cluster_size": 10, "min_samples": 4},
-    {"min_cluster_size": 12, "min_samples": 6},
-    {"min_cluster_size": 15, "min_samples": 8},
-]
-
+# =========================================================================
+# HDBSCAN CONFIG SWEEP & CLUSTERING
+# =========================================================================
 all_results = []
 final_chunks = []
 global_cluster_offset = 0
@@ -176,11 +90,6 @@ eligible_topics = topic_counts[topic_counts >= MIN_TOPIC_SIZE].index.tolist()
 
 print("\nEligible topics for clustering:")
 print(topic_counts[topic_counts >= MIN_TOPIC_SIZE])
-
-
-# ===========================================================================
-# 4. CLUSTER PER TOPIC
-# ===========================================================================
 for topic_name in eligible_topics:
     safe_topic = topic_name.replace("/", "_").replace(" ", "_")
 
@@ -194,42 +103,43 @@ for topic_name in eligible_topics:
     documents = df_topic[TEXT_COLUMN].tolist()
 
     # ---- EMBEDDINGS (with caching) ----
-    emb_path = os.path.join(EMB_DIR, f"{safe_topic}_embeddings.npy")
+    emb_path = EMB_DIR / f"{safe_topic}_embeddings.npy"
 
-    if os.path.exists(emb_path):
+    if emb_path.exists():
         print(f"Loading cached embeddings from {emb_path}...")
-        embeddings = np.load(emb_path)
+        embeddings = np.load(emb_path).astype(np.float32)
         if embeddings.shape[0] != len(df_topic):
             print(f"  Cache mismatch ({embeddings.shape[0]} vs {len(df_topic)}), regenerating...")
             embeddings = model.encode(
                 documents, batch_size=32, show_progress_bar=True,
                 convert_to_numpy=True, normalize_embeddings=True
-            )
+            ).astype(np.float32)
             np.save(emb_path, embeddings)
     else:
         print("Generating embeddings...")
         embeddings = model.encode(
             documents, batch_size=32, show_progress_bar=True,
             convert_to_numpy=True, normalize_embeddings=True
-        )
+        ).astype(np.float32)
         np.save(emb_path, embeddings)
 
     print(f"Embeddings shape: {embeddings.shape}")
 
     # ---- FAISS INDEX (save to disk) ----
     print("Building FAISS index...")
+    embeddings = np.asarray(embeddings, dtype=np.float32)
     dimension = embeddings.shape[1]
     index = faiss.IndexFlatIP(dimension)
     index.add(embeddings)
     print(f"Vectors indexed: {index.ntotal}")
 
-    faiss_path = os.path.join(FAISS_DIR, f"{safe_topic}.faiss")
-    faiss.write_index(index, faiss_path)
+    faiss_path = FAISS_DIR / f"{safe_topic}.faiss"
+    faiss.write_index(index, str(faiss_path))
     print(f"FAISS index saved to: {faiss_path}")
 
     # Quick nearest-neighbor check
     k = 5
-    distances, indices = index.search(embeddings[:3], k)
+    distances, indices = index.search(np.asarray(embeddings[:3], dtype=np.float32), k)
     print("\nNearest neighbor examples:")
     for i in range(min(3, len(df_topic))):
         print(f"\n  Document {i}: {str(df_topic.iloc[i]['title'])[:80]}")
@@ -240,51 +150,45 @@ for topic_name in eligible_topics:
             )
 
     # ---- UMAP 15-D (for clustering) - with caching ----
-    umap15d_path = os.path.join(UMAP_DIR, f"{safe_topic}_umap15d.npy")
+    umap15d_path = UMAP_DIR / f"{safe_topic}_umap15d.npy"
 
-    if os.path.exists(umap15d_path):
+    if umap15d_path.exists():
         print(f"\nLoading cached UMAP 15-D from {umap15d_path}...")
-        embeddings_reduced = np.load(umap15d_path)
+        embeddings_reduced = np.load(umap15d_path).astype(np.float32)
         if embeddings_reduced.shape[0] != len(df_topic):
             print(f"  Cache mismatch, regenerating...")
             reducer = umap.UMAP(n_neighbors=30, n_components=15, metric="cosine", random_state=42)
-            embeddings_reduced = reducer.fit_transform(embeddings)
+            embeddings_reduced = np.asarray(reducer.fit_transform(embeddings), dtype=np.float32)
             np.save(umap15d_path, embeddings_reduced)
     else:
         print("\nReducing dimensions with UMAP (15-D for clustering)...")
         reducer = umap.UMAP(n_neighbors=30, n_components=15, metric="cosine", random_state=42)
-        embeddings_reduced = reducer.fit_transform(embeddings)
+        embeddings_reduced = np.asarray(reducer.fit_transform(embeddings), dtype=np.float32)
         np.save(umap15d_path, embeddings_reduced)
 
     print(f"UMAP 15-D shape: {embeddings_reduced.shape}")
 
     # ---- UMAP 2-D (for dashboard scatter) - with caching ----
-    umap2d_path = os.path.join(UMAP_DIR, f"{safe_topic}_umap2d.npy")
+    umap2d_path = UMAP_DIR / f"{safe_topic}_umap2d.npy"
 
-    if os.path.exists(umap2d_path):
+    if umap2d_path.exists():
         print(f"Loading cached UMAP 2-D from {umap2d_path}...")
-        embeddings_2d = np.load(umap2d_path)
+        embeddings_2d = np.load(umap2d_path).astype(np.float32)
         if embeddings_2d.shape[0] != len(df_topic):
             print(f"  Cache mismatch, regenerating...")
             reducer_2d = umap.UMAP(n_neighbors=30, n_components=2, metric="cosine", random_state=42)
-            embeddings_2d = reducer_2d.fit_transform(embeddings)
+            embeddings_2d = np.asarray(reducer_2d.fit_transform(embeddings), dtype=np.float32)
             np.save(umap2d_path, embeddings_2d)
     else:
         print("Reducing dimensions with UMAP (2-D for visualization)...")
         reducer_2d = umap.UMAP(n_neighbors=30, n_components=2, metric="cosine", random_state=42)
-        embeddings_2d = reducer_2d.fit_transform(embeddings)
+        embeddings_2d = np.asarray(reducer_2d.fit_transform(embeddings), dtype=np.float32)
         np.save(umap2d_path, embeddings_2d)
 
     print(f"UMAP 2-D shape: {embeddings_2d.shape}")
 
     # ---- HDBSCAN CONFIG SWEEP ----
-    topic_specific_configs = default_configs
-    if topic_name == "politica":
-        topic_specific_configs = [
-            {"min_cluster_size": 10, "min_samples": 4},
-            {"min_cluster_size": 12, "min_samples": 6},
-            {"min_cluster_size": 15, "min_samples": 8},
-        ]
+    topic_specific_configs = HDBSCAN_TOPIC_CONFIGS.get(topic_name, HDBSCAN_DEFAULT_CONFIGS)
 
     best_result = None
 
@@ -352,31 +256,33 @@ for topic_name in eligible_topics:
         if best_result is None or result["selection_score"] > best_result["selection_score"]:
             best_result = result
 
-    print(f"\nBest config for {topic_name}: {best_result['cfg']}")
-    print(f"  Clusters: {best_result['num_clusters']}, "
-          f"Noise: {best_result['num_noise']} ({best_result['noise_percent']:.1f}%), "
-          f"Silhouette: {best_result['silhouette']}")
+    if best_result is not None:
+        print(f"\nBest config for {topic_name}: {best_result['cfg']}")
+        print(f"  Clusters: {best_result['num_clusters']}, "
+              f"Noise: {best_result['num_noise']} ({best_result['noise_percent']:.1f}%), "
+              f"Silhouette: {best_result['silhouette']}")
 
-    df_topic["best_min_cluster_size"] = best_result["cfg"]["min_cluster_size"]
-    df_topic["best_min_samples"] = best_result["cfg"]["min_samples"]
+        df_topic["best_min_cluster_size"] = best_result["cfg"]["min_cluster_size"]
+        df_topic["best_min_samples"] = best_result["cfg"]["min_samples"]
 
-    local_labels = best_result["labels"]
-    global_labels = []
-    for lbl in local_labels:
-        if lbl == -1:
-            global_labels.append(-1)
-        else:
-            global_labels.append(lbl + global_cluster_offset)
+        local_labels = best_result["labels"]
+        global_labels = []
+        for lbl in local_labels:
+            if lbl == -1:
+                global_labels.append(-1)
+            else:
+                global_labels.append(lbl + global_cluster_offset)
 
-    df_topic["cluster"] = global_labels
-    df_topic["umap_x"] = embeddings_2d[:, 0]
-    df_topic["umap_y"] = embeddings_2d[:, 1]
+        df_topic["cluster"] = global_labels
+        embeddings_2d_arr = np.asarray(embeddings_2d, dtype=np.float32)
+        df_topic["umap_x"] = embeddings_2d_arr[:, 0]
+        df_topic["umap_y"] = embeddings_2d_arr[:, 1]
 
-    real_local_clusters = len(set(local_labels)) - (1 if -1 in local_labels else 0)
-    if real_local_clusters > 0:
-        global_cluster_offset += real_local_clusters
+        real_local_clusters = len(set(local_labels)) - (1 if -1 in local_labels else 0)
+        if real_local_clusters > 0:
+            global_cluster_offset += real_local_clusters
 
-    final_chunks.append(df_topic)
+        final_chunks.append(df_topic)
 
 
 # Small topics go to noise
@@ -436,15 +342,15 @@ for cid in sorted(final_df["cluster"].unique()):
         break
 
 
-# ===========================================================================
-# 6. SAVE
-# ===========================================================================
+# =========================================================================
+# SAVE
+# =========================================================================
 results_df = pd.DataFrame(all_results)
-results_path = os.path.join(CLUSTER_DIR, "hdbscan_config_results.csv")
+results_path = CLUSTER_DIR / "hdbscan_config_results.csv"
 results_df.to_csv(results_path, index=False)
 print(f"\nConfig results saved to: {results_path}")
 
-output_path = os.path.join(CLUSTER_DIR, "clustered_data.csv")
+output_path = CLUSTER_DIR / "clustered_data.csv"
 final_df.to_csv(output_path, index=False)
 print(f"Clustered data saved to: {output_path}")
 print(f"Final shape: {final_df.shape}")
