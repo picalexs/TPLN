@@ -58,7 +58,7 @@ RoLargeSum Dataset (HuggingFace)
 ┌────────────────┐  ┌─────────────────┐
 │ TemporalAnaly- │  │ TFIDFBaseline.py│  Ablation
 │ sis.py         │  │ (Ablation)      │  → data/tfidf_ablation_report.csv
-│ Phase 5: Burst │  └────────┬────────┘
+│ Burst          │  └────────┬────────┘
 │ → cluster_     │           │
 │   temporal_    │           │
 │   stats.csv    │           │

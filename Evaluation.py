@@ -1,5 +1,5 @@
 """
-Phase 6a - Evaluation Report
+Evaluation Report
 =============================
 Loads pre-computed artefacts (clustered CSV, embeddings, config results,
 temporal stats) and produces a consolidated evaluation report.
