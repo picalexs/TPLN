@@ -193,7 +193,7 @@ with tab1:
                 xaxis_title="UMAP-1", yaxis_title="UMAP-2",
                 legend_title="Topic",
             )
-            st.plotly_chart(fig_scatter, width="stretch")
+            st.plotly_chart(fig_scatter, use_container_width=True)
 
             fig_scatter2 = px.scatter(
                 scatter_df,
@@ -208,7 +208,7 @@ with tab1:
                 xaxis_title="UMAP-1", yaxis_title="UMAP-2",
                 showlegend=False,
             )
-            st.plotly_chart(fig_scatter2, width="stretch")
+            st.plotly_chart(fig_scatter2, use_container_width=True)
         else:
             st.info("No UMAP data available for the selected filters.")
     else:
@@ -237,7 +237,7 @@ with tab1:
         if len(filtered_temporal) > 0:
             st.dataframe(
                 filtered_temporal[available_cols].head(50),
-                width="stretch",
+                use_container_width=True,
                 hide_index=True,
             )
         else:
@@ -259,7 +259,7 @@ with tab1:
             cluster_articles[["title", "topics", "timestamp_date", "url"]]
             .rename(columns={"timestamp_date": "date"})
             .head(30),
-            width="stretch",
+            use_container_width=True,
             hide_index=True,
         )
 
@@ -339,7 +339,7 @@ with tab2:
                     yaxis_title="Articles per day",
                     height=400,
                 )
-                st.plotly_chart(fig_timeline, width="stretch")
+                st.plotly_chart(fig_timeline, use_container_width=True)
 
                 # Weekly view
                 weekly = cluster_data.set_index("timestamp").resample("W").size()
@@ -355,7 +355,7 @@ with tab2:
                     yaxis_title="Articles per week",
                     height=350,
                 )
-                st.plotly_chart(fig_weekly, width="stretch")
+                st.plotly_chart(fig_weekly, use_container_width=True)
             else:
                 st.warning(f"No timestamped articles in cluster {sel_cluster_id}.")
         else:
@@ -368,7 +368,7 @@ with tab2:
             title="Distribution of daily burst scores across all clusters",
             nbins=max(int(temporal_df["burst_score"].max()) + 1, 5),
         )
-        st.plotly_chart(fig_burst_dist, width="stretch")
+        st.plotly_chart(fig_burst_dist, use_container_width=True)
 
         # Burst vs size scatter
         st.subheader("Burst Score vs Cluster Size")
@@ -384,7 +384,7 @@ with tab2:
                 title="Cluster size vs Burst score (bubble size = suspicion)",
                 height=500,
             )
-            st.plotly_chart(fig_burst_size, width="stretch")
+            st.plotly_chart(fig_burst_size, use_container_width=True)
     else:
         st.info("Temporal stats not available. Run TemporalAnalysis.py first.")
 
@@ -433,7 +433,7 @@ with tab3:
                         arts[["title", "topics", "timestamp_date", "url"]]
                         .rename(columns={"timestamp_date": "date"})
                         .head(10),
-                        width="stretch",
+                        use_container_width=True,
                         hide_index=True,
                     )
     else:
@@ -449,7 +449,7 @@ with tab4:
     # HDBSCAN Config Results
     if config_df is not None:
         st.subheader("HDBSCAN Config Sweep Results")
-        st.dataframe(config_df, width="stretch", hide_index=True)
+        st.dataframe(config_df, use_container_width=True, hide_index=True)
 
         best = (
             config_df.sort_values("selection_score", ascending=False)
@@ -464,7 +464,7 @@ with tab4:
             text="silhouette",
         )
         fig_sil.update_traces(texttemplate="%{text:.3f}", textposition="auto")
-        st.plotly_chart(fig_sil, width="stretch")
+        st.plotly_chart(fig_sil, use_container_width=True)
 
         fig_noise = px.bar(
             best, x="topic_group", y="noise_percent",
@@ -473,13 +473,13 @@ with tab4:
             text="noise_percent",
         )
         fig_noise.update_traces(texttemplate="%{text:.1f}%", textposition="auto")
-        st.plotly_chart(fig_noise, width="stretch")
+        st.plotly_chart(fig_noise, use_container_width=True)
 
     # Ablation Comparison
     if ablation_df is not None:
         st.subheader("Ablation: TF-IDF/KMeans vs SBERT/KMeans vs SBERT/HDBSCAN")
 
-        st.dataframe(ablation_df, width="stretch", hide_index=True)
+        st.dataframe(ablation_df, use_container_width=True, hide_index=True)
 
         sil_df = ablation_df[ablation_df["silhouette"].notna()].copy()
         if len(sil_df) > 0:
@@ -491,7 +491,7 @@ with tab4:
                 text="silhouette",
             )
             fig_ablation.update_traces(texttemplate="%{text:.3f}", textposition="auto")
-            st.plotly_chart(fig_ablation, width="stretch")
+            st.plotly_chart(fig_ablation, use_container_width=True)
 
         db_df = ablation_df[ablation_df["davies_bouldin"].notna()].copy()
         if len(db_df) > 0:
@@ -503,7 +503,7 @@ with tab4:
                 text="davies_bouldin",
             )
             fig_db.update_traces(texttemplate="%{text:.3f}", textposition="auto")
-            st.plotly_chart(fig_db, width="stretch")
+            st.plotly_chart(fig_db, use_container_width=True)
     else:
         st.info("Ablation report not found. Run TFIDFBaseline.py first.")
 
@@ -511,7 +511,7 @@ with tab4:
     if os.path.exists(EVAL_CSV):
         st.subheader("Detailed Evaluation Report")
         eval_df = pd.read_csv(EVAL_CSV)
-        st.dataframe(eval_df, width="stretch", hide_index=True)
+        st.dataframe(eval_df, use_container_width=True, hide_index=True)
 
 
 # ---------------------------------------------------------------------------
