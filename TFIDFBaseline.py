@@ -22,7 +22,8 @@ import numpy as np
 import pandas as pd
 
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.cluster import KMeans
+from sklearn.cluster import KMeans, MiniBatchKMeans
+from sklearn.decomposition import TruncatedSVD
 from sklearn.metrics import silhouette_score, davies_bouldin_score
 
 from src.config import (
@@ -37,6 +38,23 @@ from src.io_utils import load_clean_csv
 from src.topic_mapping import normalize_topic
 
 warnings.filterwarnings("ignore")
+
+
+def build_metric_space(X_sparse):
+    """Create a compact dense representation for dense-only clustering metrics."""
+    max_components = min(100, X_sparse.shape[0] - 1, X_sparse.shape[1] - 1)
+    if max_components < 2:
+        print("  Metric space: skipped TruncatedSVD (matrix too small).")
+        return None
+
+    svd = TruncatedSVD(n_components=max_components, random_state=42)
+    X_reduced = np.asarray(svd.fit_transform(X_sparse), dtype=np.float32)
+    explained = float(svd.explained_variance_ratio_.sum())
+    print(
+        f"  Metric space via TruncatedSVD: {X_reduced.shape} "
+        f"(explained variance={explained:.2%})"
+    )
+    return X_reduced
 
 
 # =========================================================================
@@ -106,23 +124,30 @@ for topic in eligible_topics:
         sublinear_tf=True,
     )
     X_sparse = vectorizer.fit_transform(corpus)
-    X = np.asarray(X_sparse.toarray(), dtype=np.float32)  # type: ignore
-    print(f"  TF-IDF matrix: {X.shape}")
+    print(f"  TF-IDF matrix: {X_sparse.shape}")
+    X_metric = build_metric_space(X_sparse)
 
     # KMeans
-    km = KMeans(n_clusters=k, random_state=42, n_init=10, max_iter=300)
-    labels = km.fit_predict(X)
+    km = MiniBatchKMeans(
+        n_clusters=k,
+        random_state=42,
+        n_init=10,
+        max_iter=300,
+        batch_size=min(len(sub), max(256, k * 10)),
+    )
+    labels = km.fit_predict(X_sparse)
 
     # Silhouette (sampled for speed)
     try:
+        sample_matrix = X_metric if X_metric is not None else X_sparse
         sample_size = min(5000, len(labels))
         idx_sample = np.random.RandomState(42).choice(len(labels), sample_size, replace=False)
-        sil = silhouette_score(X[idx_sample], labels[idx_sample], metric="cosine")
+        sil = silhouette_score(sample_matrix[idx_sample], labels[idx_sample], metric="cosine")
     except Exception:
         sil = None
 
     try:
-        db = davies_bouldin_score(X, labels)
+        db = davies_bouldin_score(X_metric, labels) if X_metric is not None else None
     except Exception:
         db = None
 

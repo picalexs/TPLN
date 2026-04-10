@@ -13,7 +13,7 @@ Outputs:
     data/evaluation_report.csv
 
 Run AFTER:
-    python Curatare.py
+    python DataCuration.py
     python EmbeddingsClustering.py
     python TemporalAnalysis.py
 """

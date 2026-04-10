@@ -3,8 +3,9 @@
 import re
 import pandas as pd
 from pandas import Timestamp
-from pandas._libs.tslibs.nattype import NaTType
 from .config import ROMANIAN_MONTHS
+
+TimestampOrNaT = Timestamp | type(pd.NaT)
 
 TEXT_DATE_SCAN_CHARS = 220
 TEXT_DATE_MAX_POSITION = 120
@@ -24,7 +25,7 @@ TEXT_DATE_CUES = (
 )
 
 
-def _build_timestamp(year: str, month: str, day: str) -> Timestamp | NaTType:
+def _build_timestamp(year: str, month: str, day: str) -> TimestampOrNaT:
     """Build a validated timestamp from date parts."""
     ts = pd.to_datetime(f"{year}-{month}-{day}", errors="coerce")
     if pd.isna(ts):
@@ -46,7 +47,7 @@ def _looks_like_metadata_date(text: str, match_start: int) -> bool:
     return any(cue in context for cue in TEXT_DATE_CUES)
 
 
-def extract_date_from_url(url) -> Timestamp | NaTType:
+def extract_date_from_url(url) -> TimestampOrNaT:
     """Extract date from URL patterns like /2021/03/23/ or /2021-03-23/"""
     if pd.isna(url):
         return pd.NaT
@@ -59,7 +60,7 @@ def extract_date_from_url(url) -> Timestamp | NaTType:
     return pd.NaT
 
 
-def extract_date_from_text(text: str) -> Timestamp | NaTType:
+def extract_date_from_text(text: str) -> TimestampOrNaT:
     """Extract likely publication date from article header text."""
     if pd.isna(text):
         return pd.NaT

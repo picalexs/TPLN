@@ -10,6 +10,7 @@ Outputs:
 """
 
 import os
+import sys
 import math
 import warnings
 import numpy as np
@@ -26,6 +27,31 @@ data_dir = os.path.join(base_dir, "data")
 CLUSTER_CSV = os.path.join(data_dir, "clusters", "clustered_data.csv")
 OUTPUT_DIR  = os.path.join(data_dir, "temporal")
 OUTPUT_PATH = os.path.join(OUTPUT_DIR, "cluster_temporal_stats.csv")
+
+TEMPORAL_STATS_COLUMNS = [
+    "cluster",
+    "topic_group",
+    "total_articles",
+    "timestamped_articles",
+    "first_seen",
+    "last_seen",
+    "span_days",
+    "temporal_spread_days",
+    "burst_score_daily",
+    "burst_duration_daily",
+    "burst_periods_daily",
+    "burst_score_weekly",
+    "burst_duration_weekly",
+    "burst_periods_weekly",
+    "burst_stable",
+    "concentration",
+    "suspicion_score",
+    "representative_title",
+    "burst_score",
+    "burst_duration_days",
+    "article_count",
+    "num_burst_periods",
+]
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -62,8 +88,9 @@ print(f"  Rows with BOTH (for analysis): {len(df_ts)}")
 
 if len(df_ts) == 0:
     print("\nWARNING: No rows with both timestamp and cluster.")
-    pd.DataFrame().to_csv(OUTPUT_PATH, index=False)
-    exit()
+    pd.DataFrame(columns=TEMPORAL_STATS_COLUMNS).to_csv(OUTPUT_PATH, index=False)
+    print(f"Wrote empty stats file with expected columns to: {OUTPUT_PATH}")
+    sys.exit(0)
 
 cluster_ids = sorted(df_ts["cluster"].unique())
 print(f"Real clusters with timestamps: {len(cluster_ids)}")
