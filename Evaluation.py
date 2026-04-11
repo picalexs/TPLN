@@ -1,50 +1,68 @@
 """
-Evaluation Report
-=============================
-Loads pre-computed artefacts (clustered CSV, embeddings, config results,
-temporal stats) and produces a consolidated evaluation report.
+Evaluation report builder.
 
-Metrics:
-  - Silhouette scores per topic x config (from HDBSCAN config sweep)
-  - Intra-cluster cosine similarity (from .npy embeddings)
-  - Burst-score vs cluster-size analysis (from temporal stats)
+Loads pre-computed parquet artefacts and the saved embedding cache, then
+produces a consolidated evaluation report.
 
-Outputs:
-    data/evaluation_report.csv
-
-Run AFTER:
-    python DataCuration.py
-    python EmbeddingsClustering.py
-    python TemporalAnalysis.py
+Output:
+    data/evaluation_report.parquet
 """
 
-import os
+from __future__ import annotations
+
+import argparse
 import glob
 import warnings
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 from sklearn.metrics.pairwise import cosine_similarity
 
+from src.paths import CLUSTERED_PARQUET, EMB_DIR, EVALUATION_REPORT, HDBSCAN_CONFIG_RESULTS, TEMPORAL_STATS
+from src.runtime_profile import apply_runtime_profile, detect_runtime_profile, format_runtime_profile
+
 warnings.filterwarnings("ignore")
 
-base_dir = os.path.dirname(os.path.abspath(__file__))
-data_dir = os.path.join(base_dir, "data")
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Build an evaluation report from parquet pipeline artefacts.",
+    )
+    parser.add_argument(
+        "--cpu-threads",
+        type=int,
+        default=None,
+        help="Override CPU thread count for pairwise similarity work.",
+    )
+    return parser.parse_args()
 
 
-# ===========================================================================
-# 1. SILHOUETTE SCORES FROM CONFIG SWEEP
-# ===========================================================================
-print("=" * 60)
-print("1. SILHOUETTE SCORES PER TOPIC x CONFIG")
-print("=" * 60)
+def load_config_results() -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Load full config sweep plus the best config per topic."""
+    print("=" * 60)
+    print("1. SILHOUETTE SCORES PER TOPIC x CONFIG")
+    print("=" * 60)
 
-config_path = os.path.join(data_dir, "clusters", "hdbscan_config_results.csv")
-if os.path.exists(config_path):
-    config_df = pd.read_csv(config_path)
-    print(f"Config file: {config_path}")
-    print(config_df[["topic_group", "min_cluster_size", "min_samples",
-                      "num_clusters", "noise_percent", "silhouette",
-                      "selection_score"]].to_string(index=False))
+    if not HDBSCAN_CONFIG_RESULTS.exists():
+        print(f"Config file not found at {HDBSCAN_CONFIG_RESULTS}")
+        return pd.DataFrame(), pd.DataFrame()
+
+    config_df = pd.read_parquet(HDBSCAN_CONFIG_RESULTS)
+    print(f"Config file: {HDBSCAN_CONFIG_RESULTS}")
+    print(
+        config_df[
+            [
+                "topic_group",
+                "min_cluster_size",
+                "min_samples",
+                "num_clusters",
+                "noise_percent",
+                "silhouette",
+                "selection_score",
+            ]
+        ].to_string(index=False)
+    )
 
     best_per_topic = (
         config_df.sort_values("selection_score", ascending=False)
@@ -53,48 +71,40 @@ if os.path.exists(config_path):
         .reset_index()
     )
     print("\nBest config per topic:")
-    print(best_per_topic[["topic_group", "min_cluster_size", "min_samples",
-                           "num_clusters", "silhouette"]].to_string(index=False))
-else:
-    print(f"Config file not found at {config_path}")
-    config_df = pd.DataFrame()
-    best_per_topic = pd.DataFrame()
+    print(
+        best_per_topic[
+            ["topic_group", "min_cluster_size", "min_samples", "num_clusters", "silhouette"]
+        ].to_string(index=False)
+    )
+    return config_df, best_per_topic
 
 
-# ===========================================================================
-# 2. INTRA-CLUSTER COSINE SIMILARITY
-# ===========================================================================
-print("\n" + "=" * 60)
-print("2. INTRA-CLUSTER COSINE SIMILARITY")
-print("=" * 60)
+def compute_intra_cluster_cosine() -> pd.DataFrame:
+    """Compute mean intra-cluster cosine similarity using cached embeddings."""
+    print("\n" + "=" * 60)
+    print("2. INTRA-CLUSTER COSINE SIMILARITY")
+    print("=" * 60)
 
-cluster_csv = os.path.join(data_dir, "clusters", "clustered_data.csv")
-cosine_records = []
+    if not CLUSTERED_PARQUET.exists():
+        print(f"Clustered parquet not found at {CLUSTERED_PARQUET}")
+        return pd.DataFrame()
 
-if os.path.exists(cluster_csv):
-    clustered_df = pd.read_csv(cluster_csv, low_memory=False)
+    clustered_df = pd.read_parquet(CLUSTERED_PARQUET)
+    emb_files = glob.glob(str(EMB_DIR / "*_embeddings.npy"))
+    cosine_records: list[dict[str, object]] = []
 
-    emb_dir = os.path.join(data_dir, "embeddings")
-    emb_files = glob.glob(os.path.join(emb_dir, "*_embeddings.npy"))
-
-    for emb_file in sorted(emb_files):
-        # e.g. politica_embeddings.npy
-        fname = os.path.basename(emb_file)
-        topic_name = fname.replace("_embeddings.npy", "")
-
+    for emb_file_str in sorted(emb_files):
+        emb_file = Path(emb_file_str)
+        topic_name = emb_file.name.replace("_embeddings.npy", "")
         print(f"\nTopic: {topic_name}")
 
-        embeddings = np.load(emb_file)
-
+        embeddings = np.asarray(np.load(emb_file), dtype=np.float32)
         if "topic_group" not in clustered_df.columns:
-            print("  Column 'topic_group' not found in clustered CSV.")
+            print("  Column 'topic_group' not found in clustered parquet.")
             continue
 
-        topic_rows = clustered_df[
-            clustered_df["topic_group"] == topic_name
-        ].copy().reset_index(drop=True)
-
-        if len(topic_rows) == 0:
+        topic_rows = clustered_df[clustered_df["topic_group"] == topic_name].copy().reset_index(drop=True)
+        if topic_rows.empty:
             print("  No rows for this topic.")
             continue
 
@@ -109,13 +119,17 @@ if os.path.exists(cluster_csv):
             topic_rows = topic_rows.iloc[:usable_len].reset_index(drop=True)
 
         real_topic_rows = topic_rows[topic_rows["cluster"] != -1]
-        if len(real_topic_rows) == 0:
+        if real_topic_rows.empty:
             print("  No rows with real clusters.")
             continue
 
+        cluster_values = topic_rows["cluster"].to_numpy()
         for cluster_id in sorted(topic_rows["cluster"].unique()):
-            idx = np.flatnonzero(topic_rows["cluster"].to_numpy() == cluster_id)
-            if len(idx) < 2 or cluster_id == -1:
+            if int(cluster_id) == -1:
+                continue
+
+            idx = np.flatnonzero(cluster_values == cluster_id)
+            if len(idx) < 2:
                 continue
 
             cluster_emb = embeddings[idx]
@@ -123,46 +137,44 @@ if os.path.exists(cluster_csv):
             np.fill_diagonal(sim_matrix, np.nan)
             mean_sim = float(np.nanmean(sim_matrix))
 
-            cosine_records.append({
-                "topic_group": topic_name,
-                "cluster": cluster_id,
-                "cluster_size": len(idx),
-                "mean_intra_cosine": round(mean_sim, 4),
-            })
+            cosine_records.append(
+                {
+                    "topic_group": topic_name,
+                    "cluster": int(cluster_id),
+                    "cluster_size": len(idx),
+                    "mean_intra_cosine": round(mean_sim, 4),
+                }
+            )
 
-        # Print summary for this topic
-        topic_cosines = [r for r in cosine_records if r["topic_group"] == topic_name]
+        topic_cosines = [record for record in cosine_records if record["topic_group"] == topic_name]
         if topic_cosines:
-            weights = np.array([r["cluster_size"] for r in topic_cosines], dtype=float)
-            values = np.array([r["mean_intra_cosine"] for r in topic_cosines], dtype=float)
-            mean_all = np.mean(values)
+            weights = np.array([record["cluster_size"] for record in topic_cosines], dtype=float)
+            values = np.array([record["mean_intra_cosine"] for record in topic_cosines], dtype=float)
+            mean_all = float(np.mean(values))
             weighted_all = float(np.average(values, weights=weights)) if weights.sum() > 0 else mean_all
             print(
                 f"  Clusters: {len(topic_cosines)}, "
                 f"Mean cosine: {mean_all:.4f}, "
                 f"Weighted cosine: {weighted_all:.4f}"
             )
-else:
-    print(f"Clustered CSV not found at {cluster_csv}")
 
-cosine_df = pd.DataFrame(cosine_records)
-if not cosine_df.empty:
-    print(f"\nGlobal mean intra-cluster cosine: {cosine_df['mean_intra_cosine'].mean():.4f}")
+    cosine_df = pd.DataFrame(cosine_records)
+    if not cosine_df.empty:
+        print(f"\nGlobal mean intra-cluster cosine: {cosine_df['mean_intra_cosine'].mean():.4f}")
+    return cosine_df
 
 
-# ===========================================================================
-# 3. BURST SCORE VS CLUSTER SIZE
-# ===========================================================================
-print("\n" + "=" * 60)
-print("3. BURST SCORE VS CLUSTER SIZE")
-print("=" * 60)
+def load_temporal_with_cosine(cosine_df: pd.DataFrame) -> pd.DataFrame:
+    """Load temporal stats and enrich them with cosine data when available."""
+    print("\n" + "=" * 60)
+    print("3. BURST SCORE VS CLUSTER SIZE")
+    print("=" * 60)
 
-temporal_path = os.path.join(data_dir, "temporal", "cluster_temporal_stats.csv")
+    if not TEMPORAL_STATS.exists():
+        print(f"Temporal stats not found at {TEMPORAL_STATS}")
+        return pd.DataFrame()
 
-if os.path.exists(temporal_path):
-    temporal_df = pd.read_csv(temporal_path)
-
-    # Merge cosine data
+    temporal_df = pd.read_parquet(TEMPORAL_STATS)
     merged = temporal_df.copy()
     if not cosine_df.empty:
         merged = merged.merge(
@@ -171,82 +183,107 @@ if os.path.exists(temporal_path):
             how="left",
         )
 
-    suspicious = merged[merged["burst_score"] > 0].sort_values(
-        "suspicion_score", ascending=False
-    )
-
+    suspicious = merged[merged["burst_score"] > 0].sort_values("suspicion_score", ascending=False)
     print(f"Clusters with burst detected: {len(suspicious)}")
     print("\nTop 15 suspicious clusters:")
-    cols = ["cluster", "topic_group", "article_count", "burst_score",
-            "burst_duration_days", "span_days", "suspicion_score"]
+
+    cols = [
+        "cluster",
+        "topic_group",
+        "article_count",
+        "burst_score",
+        "burst_duration_days",
+        "span_days",
+        "suspicion_score",
+    ]
     if "mean_intra_cosine" in suspicious.columns:
         cols.append("mean_intra_cosine")
     print(suspicious[cols].head(15).to_string(index=False))
 
-    # Correlation
-    corr = temporal_df[["burst_score", "article_count", "span_days",
-                         "temporal_spread_days"]].corr()
+    corr = temporal_df[["burst_score", "article_count", "span_days", "temporal_spread_days"]].corr()
     print("\nCorrelation matrix:")
     print(corr.to_string())
-else:
-    print(f"Temporal stats not found at {temporal_path}")
-    merged = pd.DataFrame()
+    return merged
 
 
-# ===========================================================================
-# 4. SAVE EVALUATION REPORT
-# ===========================================================================
-report_rows = []
+def build_report(
+    config_df: pd.DataFrame,
+    best_per_topic: pd.DataFrame,
+    cosine_df: pd.DataFrame,
+    merged_temporal_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Assemble the final report table."""
+    report_rows: list[dict[str, object]] = []
 
-# Config summary rows
-if not config_df.empty:
-    for _, row in best_per_topic.iterrows():
-        report_rows.append({
-            "section": "silhouette",
-            "topic_group": row.get("topic_group"),
-            "cluster": None,
-            "method": "sbert_hdbscan",
-            "silhouette": row.get("silhouette"),
-            "noise_percent": row.get("noise_percent"),
-            "num_clusters": row.get("num_clusters"),
-            "mean_intra_cosine": None,
-            "burst_score": None,
-            "suspicion_score": None,
-        })
+    if not config_df.empty:
+        for _, row in best_per_topic.iterrows():
+            report_rows.append(
+                {
+                    "section": "silhouette",
+                    "topic_group": row.get("topic_group"),
+                    "cluster": None,
+                    "method": "sbert_hdbscan",
+                    "silhouette": row.get("silhouette"),
+                    "noise_percent": row.get("noise_percent"),
+                    "num_clusters": row.get("num_clusters"),
+                    "mean_intra_cosine": None,
+                    "burst_score": None,
+                    "suspicion_score": None,
+                }
+            )
 
-# Cosine per cluster rows
-for _, row in cosine_df.iterrows():
-    report_rows.append({
-        "section": "intra_cosine",
-        "topic_group": row.get("topic_group"),
-        "cluster": row.get("cluster"),
-        "method": "sbert_hdbscan",
-        "silhouette": None,
-        "noise_percent": None,
-        "num_clusters": None,
-        "mean_intra_cosine": row.get("mean_intra_cosine"),
-        "burst_score": None,
-        "suspicion_score": None,
-    })
+    for _, row in cosine_df.iterrows():
+        report_rows.append(
+            {
+                "section": "intra_cosine",
+                "topic_group": row.get("topic_group"),
+                "cluster": row.get("cluster"),
+                "method": "sbert_hdbscan",
+                "silhouette": None,
+                "noise_percent": None,
+                "num_clusters": None,
+                "mean_intra_cosine": row.get("mean_intra_cosine"),
+                "burst_score": None,
+                "suspicion_score": None,
+            }
+        )
 
-# Burst per cluster rows
-if os.path.exists(temporal_path) and not merged.empty:
-    for _, row in merged.iterrows():
-        report_rows.append({
-            "section": "burst",
-            "topic_group": row.get("topic_group"),
-            "cluster": row.get("cluster"),
-            "method": "sbert_hdbscan",
-            "silhouette": None,
-            "noise_percent": None,
-            "num_clusters": None,
-            "mean_intra_cosine": row.get("mean_intra_cosine"),
-            "burst_score": row.get("burst_score"),
-            "suspicion_score": row.get("suspicion_score"),
-        })
+    if not merged_temporal_df.empty:
+        for _, row in merged_temporal_df.iterrows():
+            report_rows.append(
+                {
+                    "section": "burst",
+                    "topic_group": row.get("topic_group"),
+                    "cluster": row.get("cluster"),
+                    "method": "sbert_hdbscan",
+                    "silhouette": None,
+                    "noise_percent": None,
+                    "num_clusters": None,
+                    "mean_intra_cosine": row.get("mean_intra_cosine"),
+                    "burst_score": row.get("burst_score"),
+                    "suspicion_score": row.get("suspicion_score"),
+                }
+            )
 
-report_df = pd.DataFrame(report_rows)
-report_path = os.path.join(data_dir, "evaluation_report.csv")
-report_df.to_csv(report_path, index=False)
-print(f"\nEvaluation report saved to: {report_path}")
-print(f"Total rows: {len(report_df)}")
+    return pd.DataFrame(report_rows)
+
+
+def main() -> int:
+    args = parse_args()
+    profile = detect_runtime_profile(device="cpu", cpu_threads=args.cpu_threads)
+    apply_runtime_profile(profile)
+    print(format_runtime_profile(profile))
+
+    config_df, best_per_topic = load_config_results()
+    cosine_df = compute_intra_cluster_cosine()
+    merged_temporal_df = load_temporal_with_cosine(cosine_df)
+    report_df = build_report(config_df, best_per_topic, cosine_df, merged_temporal_df)
+
+    report_df.to_parquet(EVALUATION_REPORT, index=False, compression="zstd")
+    print(f"\nEvaluation report saved to: {EVALUATION_REPORT}")
+    print(f"Total rows: {len(report_df)}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

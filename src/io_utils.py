@@ -2,32 +2,44 @@
 
 import os
 import pandas as pd
-from .paths import CLEAN_CSV
+from .paths import CLEAN_PARQUET
 
 
-def load_clean_csv(nrows=None):
-    """Load the cleaned CSV with optional row limit.
+def load_clean_data(nrows=None, columns=None):
+    """Load the cleaned dataset with optional row limit and column subset.
 
     Assumes data has already been cleaned by DataCuration.py.
     Fills NaN values in required text columns and validates the expected schema.
     """
-    if not os.path.exists(CLEAN_CSV):
+    if not os.path.exists(CLEAN_PARQUET):
         raise FileNotFoundError(
-            f"Cleaned CSV not found at {CLEAN_CSV}.\n"
+            f"Cleaned dataset not found at {CLEAN_PARQUET}.\n"
             "Run DataCuration.py first."
         )
 
-    df = pd.read_csv(CLEAN_CSV, nrows=nrows)
+    df = pd.read_parquet(CLEAN_PARQUET, columns=columns)
+    if nrows is not None:
+        df = df.head(nrows).copy()
 
     required_cols = ["title", "document", "short_document", "document_nostop", "topics"]
-    missing_cols = [col for col in required_cols if col not in df.columns]
+    required_for_this_load = (
+        required_cols
+        if columns is None
+        else [col for col in required_cols if col in columns]
+    )
+    missing_cols = [col for col in required_for_this_load if col not in df.columns]
     if missing_cols:
         raise ValueError(
-            "Cleaned CSV is missing required columns: "
+            "Cleaned parquet is missing required columns: "
             f"{', '.join(missing_cols)}. Re-run DataCuration.py."
         )
 
-    for col in required_cols:
+    for col in required_for_this_load:
         df[col] = df[col].fillna("").astype(str)
 
     return df
+
+
+def load_clean_csv(nrows=None):
+    """Backward-compatible alias for loading the cleaned dataset."""
+    return load_clean_data(nrows=nrows)

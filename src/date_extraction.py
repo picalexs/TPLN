@@ -1,16 +1,25 @@
 """Date extraction utilities from URLs and text."""
 
 import re
+from typing import Any, TypeAlias
 from urllib.parse import parse_qs, unquote, urlparse
 import pandas as pd
-from pandas import Timestamp
 from .config import (
     ROMANIAN_MONTHS,
+    TIMESTAMP_MAX_FUTURE_DAYS_TEXT,
+    TIMESTAMP_MAX_FUTURE_DAYS_URL,
+    TIMESTAMP_QUALITY_HIGH,
+    TIMESTAMP_QUALITY_LOW,
+    TIMESTAMP_QUALITY_MEDIUM,
+    TIMESTAMP_QUALITY_MISSING,
+    TIMESTAMP_QUALITY_REJECTED_FUTURE,
+    TIMESTAMP_SOURCE_TEXT,
     TIMESTAMP_SOURCE_MISSING,
     TIMESTAMP_SOURCE_URL,
+    TIMESTAMP_TEXT_LOW_CONFIDENCE_BEFORE_YEAR,
 )
 
-TimestampOrNaT = Timestamp | type(pd.NaT)
+TimestampOrNaT: TypeAlias = Any
 
 TEXT_DATE_SCAN_CHARS = 220
 TEXT_DATE_MAX_POSITION = 120
@@ -63,6 +72,35 @@ def _build_timestamp(year: str, month: str, day: str) -> TimestampOrNaT:
     if TEXT_DATE_MIN_YEAR <= ts.year <= max_year:
         return ts
     return pd.NaT
+
+
+def validate_extracted_timestamp(
+    timestamp: TimestampOrNaT,
+    source: str,
+) -> tuple[TimestampOrNaT, str]:
+    """Validate an extracted timestamp and assign a quality label."""
+    if pd.isna(timestamp):
+        return pd.NaT, TIMESTAMP_QUALITY_MISSING
+
+    source = str(source).strip().lower()
+    today = pd.Timestamp.today().normalize()
+    max_future_days = (
+        TIMESTAMP_MAX_FUTURE_DAYS_TEXT
+        if source == TIMESTAMP_SOURCE_TEXT
+        else TIMESTAMP_MAX_FUTURE_DAYS_URL
+    )
+    if timestamp.normalize() > today + pd.Timedelta(days=max_future_days):
+        return pd.NaT, TIMESTAMP_QUALITY_REJECTED_FUTURE
+
+    if source == TIMESTAMP_SOURCE_URL:
+        return timestamp, TIMESTAMP_QUALITY_HIGH
+
+    if source == TIMESTAMP_SOURCE_TEXT:
+        if timestamp.year < TIMESTAMP_TEXT_LOW_CONFIDENCE_BEFORE_YEAR:
+            return timestamp, TIMESTAMP_QUALITY_LOW
+        return timestamp, TIMESTAMP_QUALITY_MEDIUM
+
+    return timestamp, TIMESTAMP_QUALITY_MISSING
 
 
 def _looks_like_metadata_date(text: str, match_start: int) -> bool:
