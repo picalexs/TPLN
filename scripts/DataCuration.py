@@ -12,10 +12,15 @@ import argparse
 import os
 from concurrent.futures import ProcessPoolExecutor
 import sys
+from pathlib import Path
 from typing import cast
 from urllib.parse import urlparse
 
 import pandas as pd
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from src.config import (
     COLUMNS_TO_CLEAN,

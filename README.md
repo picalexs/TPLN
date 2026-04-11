@@ -14,19 +14,19 @@ Detailed architecture guide: [`docs/PIPELINE_GUIDE.md`](docs/PIPELINE_GUIDE.md)
 Run the scripts in this order:
 
 ```bash
-python DataCuration.py
-python EmbeddingsClustering.py
-python TemporalAnalysis.py
-python Evaluation.py
-python PrepareDashboardData.py
-streamlit run Dashboard.py
+python scripts/DataCuration.py
+python scripts/EmbeddingsClustering.py
+python scripts/TemporalAnalysis.py
+python scripts/Evaluation.py
+python scripts/PrepareDashboardData.py
+streamlit run scripts/Dashboard.py
 ```
 
 Optionally, run the TF-IDF baseline ablation, for comparison (note: this takes
 some time to run):
 
 ```bash
-python TFIDFBaseline.py
+python scripts/TFIDFBaseline.py
 ```
 
 ## Artefacts
@@ -74,7 +74,7 @@ If `torch.cuda.is_available()` prints `True`, the pipeline will use GPU
 automatically for SentenceTransformer embeddings. If you need a different CUDA
 build, use the official selector: <https://pytorch.org/get-started/locally/>
 
-For the first `DataCuration.py` run, add your Hugging Face token to `.env`:
+For the first `scripts/DataCuration.py` run, add your Hugging Face token to `.env`:
 
 ```text
 HF_TOKEN=your_huggingface_token_here
@@ -82,18 +82,18 @@ HF_TOKEN=your_huggingface_token_here
 
 ## Main Components
 
-- `DataCuration.py`: downloads or loads RoLargeSum, cleans text, extracts
+- `scripts/DataCuration.py`: downloads or loads RoLargeSum, cleans text, extracts
   timestamps, writes cleaned parquet
-- `EmbeddingsClustering.py`: creates or reuses embedding caches, clusters per
+- `scripts/EmbeddingsClustering.py`: creates or reuses embedding caches, clusters per
   topic, writes clustering outputs
-- `TemporalAnalysis.py`: computes burst and temporal concentration features per
+- `scripts/TemporalAnalysis.py`: computes burst and temporal concentration features per
   cluster
-- `Evaluation.py`: combines clustering, embedding, and temporal metrics into one
+- `scripts/Evaluation.py`: combines clustering, embedding, and temporal metrics into one
   evaluation report
-- `TFIDFBaseline.py`: runs TF-IDF and SBERT ablation baselines
-- `PrepareDashboardData.py`: builds fast parquet dashboard assets from the
+- `scripts/TFIDFBaseline.py`: runs TF-IDF and SBERT ablation baselines
+- `scripts/PrepareDashboardData.py`: builds fast parquet dashboard assets from the
   clustering outputs
-- `Dashboard.py`: Streamlit explorer for clusters, timelines, campaigns, and
+- `scripts/Dashboard.py`: Streamlit explorer for clusters, timelines, campaigns, and
   evaluation
 
 ## Notes

@@ -7,13 +7,13 @@ models and algorithms are doing.
 ## Quick File Map
 
 - Main pipeline entrypoints:
-  - [`DataCuration.py`](../DataCuration.py)
-  - [`EmbeddingsClustering.py`](../EmbeddingsClustering.py)
-  - [`TemporalAnalysis.py`](../TemporalAnalysis.py)
-  - [`Evaluation.py`](../Evaluation.py)
-  - [`TFIDFBaseline.py`](../TFIDFBaseline.py)
-  - [`PrepareDashboardData.py`](../PrepareDashboardData.py)
-  - [`Dashboard.py`](../Dashboard.py)
+  - [`scripts/DataCuration.py`](../scripts/DataCuration.py)
+  - [`scripts/EmbeddingsClustering.py`](../scripts/EmbeddingsClustering.py)
+  - [`scripts/TemporalAnalysis.py`](../scripts/TemporalAnalysis.py)
+  - [`scripts/Evaluation.py`](../scripts/Evaluation.py)
+  - [`scripts/TFIDFBaseline.py`](../scripts/TFIDFBaseline.py)
+  - [`scripts/PrepareDashboardData.py`](../scripts/PrepareDashboardData.py)
+  - [`scripts/Dashboard.py`](../scripts/Dashboard.py)
 - Shared infrastructure:
   - [`src/config.py`](../src/config.py)
   - [`src/paths.py`](../src/paths.py)
@@ -22,8 +22,8 @@ models and algorithms are doing.
   - [`src/topic_mapping.py`](../src/topic_mapping.py)
   - [`src/text_processing.py`](../src/text_processing.py)
   - [`src/date_extraction.py`](../src/date_extraction.py)
-- Optional data source:
-  - [`DownloadGDELT.py`](../DownloadGDELT.py)
+- Entry points are grouped in `scripts/` so the repo root stays focused on
+  shared code, docs, and configuration.
 
 ## High-Level Goal
 
@@ -49,7 +49,7 @@ also look temporally suspicious.
                                          |
                                          v
                       +--------------------------------------+
-                      | DataCuration.py                      |
+                      | scripts/DataCuration.py              |
                       | - clean text                         |
                       | - extract timestamps                 |
                       | - build document fields              |
@@ -61,7 +61,7 @@ also look temporally suspicious.
                                        |
                                        v
                   +---------------------------------------------+
-                  | EmbeddingsClustering.py                     |
+                  | scripts/EmbeddingsClustering.py             |
                   | - normalize topic labels                    |
                   | - encode short_document with SBERT          |
                   | - cache embeddings per topic                |
@@ -80,7 +80,7 @@ also look temporally suspicious.
                              |                                                                 |
                              v                                                                 v
              +----------------------------------+                         +----------------------------------+
-             | TemporalAnalysis.py              |                         | TFIDFBaseline.py                 |
+             | scripts/TemporalAnalysis.py      |                         | scripts/TFIDFBaseline.py         |
              | - daily/weekly burst detection   |                         | - TF-IDF + KMeans                |
              | - coverage/domain/source stats   |                         | - SBERT + KMeans                 |
              | - suspicion score                |                         | - compare with SBERT+HDBSCAN     |
@@ -91,7 +91,7 @@ also look temporally suspicious.
                               |
                               v
                   +-------------------------------+
-                  | Evaluation.py                 |
+                  | scripts/Evaluation.py         |
                   | - best-config summary         |
                   | - intra-cluster cosine        |
                   | - burst/size relationships    |
@@ -102,7 +102,7 @@ also look temporally suspicious.
                               |
                               v
                 +--------------------------------------+
-                | PrepareDashboardData.py              |
+                | scripts/PrepareDashboardData.py      |
                 | - build dashboard parquet assets     |
                 | - cluster overview                   |
                 | - article detail                     |
@@ -114,7 +114,7 @@ also look temporally suspicious.
                        data/dashboard/*.parquet
                                  |
                                  v
-                         Dashboard.py (Streamlit)
+                         scripts/Dashboard.py (Streamlit)
 ```
 
 ## Data Artefacts
@@ -141,7 +141,7 @@ Why this matters:
 
 Code:
 
-- [`DataCuration.py`](../DataCuration.py)
+- [`scripts/DataCuration.py`](../scripts/DataCuration.py)
 - [`src/text_processing.py`](../src/text_processing.py)
 - [`src/date_extraction.py`](../src/date_extraction.py)
 - [`src/config.py`](../src/config.py)
@@ -242,7 +242,7 @@ topic bucket, but also how that bucket was chosen.
 
 Code:
 
-- [`EmbeddingsClustering.py`](../EmbeddingsClustering.py)
+- [`scripts/EmbeddingsClustering.py`](../scripts/EmbeddingsClustering.py)
 - [`src/runtime_profile.py`](../src/runtime_profile.py)
 - [`src/config.py`](../src/config.py)
 
@@ -281,8 +281,8 @@ The script writes one `.npy` file per topic bucket in `data/embeddings/`.
 That gives two benefits:
 
 1. reruns are much faster if topic membership did not change
-2. later scripts like [`Evaluation.py`](../Evaluation.py) and
-   [`TFIDFBaseline.py`](../TFIDFBaseline.py) can reuse the same embeddings
+2. later scripts like [`scripts/Evaluation.py`](../scripts/Evaluation.py) and
+   [`scripts/TFIDFBaseline.py`](../scripts/TFIDFBaseline.py) can reuse the same embeddings
 
 ### Why FAISS is still present
 
@@ -373,7 +373,7 @@ with `topic_is_eligible = False`.
 
 Code:
 
-- [`TemporalAnalysis.py`](../TemporalAnalysis.py)
+- [`scripts/TemporalAnalysis.py`](../scripts/TemporalAnalysis.py)
 
 This stage asks: “which semantic clusters also behave suspiciously over time?”
 
@@ -435,7 +435,7 @@ It is closer to:
 
 Code:
 
-- [`Evaluation.py`](../Evaluation.py)
+- [`scripts/Evaluation.py`](../scripts/Evaluation.py)
 
 This stage summarizes the quality of the discovered clusters.
 
@@ -457,7 +457,7 @@ real cluster. That gives an additional quality signal beyond the HDBSCAN sweep.
 
 Code:
 
-- [`TFIDFBaseline.py`](../TFIDFBaseline.py)
+- [`scripts/TFIDFBaseline.py`](../scripts/TFIDFBaseline.py)
 
 This script is used to answer:
 
@@ -495,7 +495,7 @@ That gives you two useful comparisons:
 
 Code:
 
-- [`PrepareDashboardData.py`](../PrepareDashboardData.py)
+- [`scripts/PrepareDashboardData.py`](../scripts/PrepareDashboardData.py)
 
 This script prepares fast dashboard inputs from the heavier pipeline artefacts.
 
@@ -531,7 +531,7 @@ aggregations.
 
 Code:
 
-- [`Dashboard.py`](../Dashboard.py)
+- [`scripts/Dashboard.py`](../scripts/Dashboard.py)
 
 The dashboard is a read-only exploration layer over the prepared parquet assets.
 
@@ -545,7 +545,7 @@ Pages:
 Main design choice:
 
 - expensive work is moved out of the dashboard and into
-  [`PrepareDashboardData.py`](../PrepareDashboardData.py)
+  [`scripts/PrepareDashboardData.py`](../scripts/PrepareDashboardData.py)
 
 That keeps the UI responsive and startup time manageable.
 
@@ -572,7 +572,7 @@ Only Sentence-BERT embedding inference is GPU-accelerated in the main pipeline.
 
 That means:
 
-- [`EmbeddingsClustering.py`](../EmbeddingsClustering.py) can run SBERT on CUDA
+- [`scripts/EmbeddingsClustering.py`](../scripts/EmbeddingsClustering.py) can run SBERT on CUDA
 - UMAP, HDBSCAN, temporal analysis, TF-IDF, evaluation, and dashboard prep
   remain CPU-based
 
