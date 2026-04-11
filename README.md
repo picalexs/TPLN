@@ -1,147 +1,105 @@
-# Detecting Coordinated Campaigns: Semantic Clustering & Temporal Analysis
+# Detecting Coordinated Campaigns: Semantic Clustering and Temporal Analysis
 
-**Cotea Carla, Ginghina Mihai, Hriscu Cosmin, Picioroaga Alexandru, Smau
-Robert**
+This project detects suspicious coordinated news campaigns by combining:
 
-> Project 5 — TPLN (Tehnici de Prelucrare a Limbajului Natural)
+1. semantic clustering with Sentence-BERT embeddings and HDBSCAN
+2. temporal burst analysis with daily and weekly burst scoring
+3. evaluation and ablation studies
+4. an interactive Streamlit dashboard
 
----
+Detailed architecture guide: [`docs/PIPELINE_GUIDE.md`](docs/PIPELINE_GUIDE.md)
 
-## Abstract
+## Pipeline
 
-This project presents a robust pipeline for detecting coordinated information
-campaigns within continuous text streams by combining semantic similarity with
-temporal analysis. Utilizing the **RoLargeSum** dataset of Romanian news
-articles, the pipeline:
-
-1. **Cleans and preprocesses** the raw corpus with tokenization and stopword
-   removal
-2. **Generates multilingual Sentence-BERT embeddings** to capture deep semantic
-   meaning
-3. **Indexes vectors with FAISS** for rapid nearest-neighbor retrieval
-4. **Clusters with HDBSCAN** to automatically identify semantic communities
-5. **Applies Kleinberg burst detection** to identify unnatural temporal spikes
-   per cluster
-6. **Evaluates** cluster quality and runs ablation studies (TF-IDF vs SBERT,
-   KMeans vs HDBSCAN)
-7. **Visualizes** everything in an interactive Streamlit dashboard
-
-By unifying semantic cohesion with temporal synchronization, this methodology
-reliably isolates highly suspicious clusters, providing a scalable unsupervised
-foundation for detecting coordinated inauthentic behavior.
-
----
-
-## Pipeline Architecture
-
-```text
-RoLargeSum Dataset (HuggingFace)
-        │
-        ▼
-┌─────────────────┐
-│ DataCuration.py │  Download + Clean + Cache
-│   (Cleaning)    │  → data/rolargesum_raw.parquet
-│                 │  → data/rolargesum_train_clean.csv
-└────────┬────────┘
-         │
-         ▼
-┌──────────────────────────┐
-│ EmbeddingsClustering.py  │  SBERT + FAISS + UMAP + HDBSCAN
-│ (Embeddings & Clusters)  │  → data/embeddings/*.npy
-│                          │  → data/faiss/*.faiss
-│                          │  → data/umap/*.npy
-│                          │  → data/clusters/clustered_data.csv
-└────────┬─────────────────┘
-         │
-    ┌────┴────┐
-    ▼         ▼
-┌────────────────┐  ┌─────────────────┐
-│ TemporalAnaly- │  │ TFIDFBaseline.py│  Ablation
-│ sis.py         │  │ (Ablation)      │  → data/tfidf_ablation_report.csv
-│ Burst          │  └────────┬────────┘
-│ → cluster_     │           │
-│   temporal_    │           │
-│   stats.csv    │           │
-└────────┬───────┘           │
-         │                   │
-         ▼                   │
-┌─────────────────┐          │
-│ Evaluation.py   │◄─────────┘  Metrics
-│ (Evaluation)    │  → data/evaluation_report.csv
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│  Dashboard.py   │  Streamlit + Plotly
-│  (Dashboard)    │  → streamlit run Dashboard.py
-└─────────────────┘
-```
-
----
-
-## Setup
-
-### 1. Clone & Install
-
-```bash
-git clone https://github.com/picalexs/TPLN
-cd TPLN
-pip install -r requirements.txt
-```
-
-### 2. HuggingFace Token
-
-Create a `.env` file in the project root (see `.env.example`):
-
-```text
-HF_TOKEN=your_huggingface_token_here
-```
-
-> This token is only needed for the **first run** of `DataCuration.py`. After
-> that, the dataset is cached locally.
-
-### 3. Run the Pipeline
-
-Run the entire pipeline in sequence. Each script saves intermediate results to
-the `data/` directory, so you can run them independently after the first
-execution.
+Run the scripts in this order:
 
 ```bash
 python DataCuration.py
 python EmbeddingsClustering.py
 python TemporalAnalysis.py
 python Evaluation.py
-python TFIDFBaseline.py
+python PrepareDashboardData.py
 streamlit run Dashboard.py
 ```
 
----
+Optionally, run the TF-IDF baseline ablation, for comparison (note: this takes
+some time to run):
 
-## Technologies
+```bash
+python TFIDFBaseline.py
+```
 
-| Component                | Technology                                              |
-| ------------------------ | ------------------------------------------------------- |
-| Language                 | Python                                                  |
-| Embeddings               | Sentence-BERT (`paraphrase-multilingual-MiniLM-L12-v2`) |
-| Vector search            | FAISS (`IndexFlatIP`)                                   |
-| Clustering               | HDBSCAN (auto K, density-based)                         |
-| Dimensionality reduction | UMAP                                                    |
-| Burst detection          | Kleinberg automaton model                               |
-| Baseline                 | TF-IDF + KMeans (ablation)                              |
-| Dashboard                | Streamlit + Plotly                                      |
-| Dataset                  | RoLargeSum (Romanian news)                              |
+## Artefacts
 
----
+The pipeline is parquet-only for normal execution.
 
-## Ablation Studies
+- `data/rolargesum_raw.parquet`
+- `data/rolargesum_train_clean.parquet`
+- `data/embeddings/*.npy`
+- `data/clusters/clustered_data.parquet`
+- `data/clusters/hdbscan_config_results.parquet`
+- `data/temporal/cluster_temporal_stats.parquet`
+- `data/evaluation_report.parquet`
+- `data/tfidf_ablation_report.parquet`
+- `data/dashboard/*.parquet`
 
-Three ablation experiments as required by the project specification:
+The GDELT downloader also writes parquet outputs in `data/gdelt/`.
 
-| #   | Comparison                         | Variable                            |
-| --- | ---------------------------------- | ----------------------------------- |
-| A   | TF-IDF + KMeans vs SBERT + HDBSCAN | Representation + clustering method  |
-| B   | SBERT + KMeans vs SBERT + HDBSCAN  | Clustering method (same embeddings) |
-| C   | With burst scoring vs without      | Impact of temporal analysis         |
+## Runtime Behavior
 
-Results are saved to `data/tfidf_ablation_report.csv` and visualized in the
-dashboard's **Evaluation & Ablation** tab.
+- SentenceTransformer inference uses GPU automatically when the installed
+  PyTorch runtime supports `cuda` or `mps`.
+- UMAP, HDBSCAN, temporal analysis, TF-IDF, and dashboard preparation stay
+  CPU-based.
+- CPU threads, embedding batch size, and parquet chunk size are auto-tuned per
+  machine.
+
+## Setup
+
+Install dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+Optional GPU support for embeddings on NVIDIA:
+
+```bash
+pip uninstall -y torch torchvision torchaudio
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+```
+
+If `torch.cuda.is_available()` prints `True`, the pipeline will use GPU
+automatically for SentenceTransformer embeddings. If you need a different CUDA
+build, use the official selector: <https://pytorch.org/get-started/locally/>
+
+For the first `DataCuration.py` run, add your Hugging Face token to `.env`:
+
+```text
+HF_TOKEN=your_huggingface_token_here
+```
+
+## Main Components
+
+- `DataCuration.py`: downloads or loads RoLargeSum, cleans text, extracts
+  timestamps, writes cleaned parquet
+- `EmbeddingsClustering.py`: creates or reuses embedding caches, clusters per
+  topic, writes clustering outputs
+- `TemporalAnalysis.py`: computes burst and temporal concentration features per
+  cluster
+- `Evaluation.py`: combines clustering, embedding, and temporal metrics into one
+  evaluation report
+- `TFIDFBaseline.py`: runs TF-IDF and SBERT ablation baselines
+- `PrepareDashboardData.py`: builds fast parquet dashboard assets from the
+  clustering outputs
+- `Dashboard.py`: Streamlit explorer for clusters, timelines, campaigns, and
+  evaluation
+
+## Notes
+
+- GPU acceleration in this repo is intentionally limited to SentenceTransformer
+  inference.
+- Saved embedding caches are kept because later scripts reuse them directly.
+- FAISS indexes, persisted UMAP arrays, and CSV pipeline outputs are not
+  generated anymore.
