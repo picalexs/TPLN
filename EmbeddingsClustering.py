@@ -18,6 +18,7 @@ import os
 
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 
+import sys
 import faiss
 import hdbscan
 import numpy as np
@@ -29,7 +30,6 @@ from sklearn.metrics import silhouette_score
 from src.config import (
     HDBSCAN_DEFAULT_CONFIGS,
     HDBSCAN_TOPIC_CONFIGS,
-    MAX_ROWS,
     MIN_TOPIC_SIZE,
     SBERT_MODEL,
     TEXT_COLUMN,
@@ -37,6 +37,11 @@ from src.config import (
 from src.io_utils import load_clean_csv
 from src.paths import CLUSTER_DIR, EMB_DIR, FAISS_DIR, INPUT_CSV, UMAP_DIR
 from src.topic_mapping import normalize_topic
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+SILHOUETTE_SAMPLE_SIZE = 5000
 
 
 def load_input_data() -> pd.DataFrame:
@@ -46,7 +51,9 @@ def load_input_data() -> pd.DataFrame:
             "Run DataCuration.py first."
         )
 
-    df = load_clean_csv(nrows=MAX_ROWS)
+    df = load_clean_csv()
+    # df = load_clean_csv(nrows=10000)  # For quick testing
+     
     print("Shape initial:", df.shape)
     print("Columns:", df.columns.tolist())
 
@@ -170,7 +177,10 @@ def load_or_create_umap(
     return reduced
 
 
-def compute_clustering_metrics(labels: np.ndarray, embeddings_reduced: np.ndarray) -> tuple[int, int, float, int, float | None]:
+def compute_clustering_metrics(
+    labels: np.ndarray,
+    embeddings_full: np.ndarray,
+) -> tuple[int, int, float, int, float | None]:
     num_clusters = len(set(labels)) - (1 if -1 in labels else 0)
     num_noise = int((labels == -1).sum())
     noise_percent = 100 * num_noise / len(labels)
@@ -182,10 +192,22 @@ def compute_clustering_metrics(labels: np.ndarray, embeddings_reduced: np.ndarra
     mask = labels != -1
     if mask.sum() > 1 and len(set(labels[mask])) > 1:
         try:
+            semantic_vectors = embeddings_full[mask]
+            semantic_labels = labels[mask]
+            if len(semantic_labels) > SILHOUETTE_SAMPLE_SIZE:
+                rng = np.random.default_rng(42)
+                sample_idx = rng.choice(
+                    len(semantic_labels),
+                    size=SILHOUETTE_SAMPLE_SIZE,
+                    replace=False,
+                )
+                semantic_vectors = semantic_vectors[sample_idx]
+                semantic_labels = semantic_labels[sample_idx]
+
             sil_score = silhouette_score(
-                embeddings_reduced[mask],
-                labels[mask],
-                metric="euclidean",
+                semantic_vectors,
+                semantic_labels,
+                metric="cosine",
             )
         except Exception:
             sil_score = None
@@ -219,6 +241,7 @@ def evaluate_topic_configs(
     topic_name: str,
     topic_size: int,
     embeddings_reduced: np.ndarray,
+    embeddings_full: np.ndarray,
 ) -> tuple[dict, list[dict]]:
     configs = HDBSCAN_TOPIC_CONFIGS.get(topic_name, HDBSCAN_DEFAULT_CONFIGS)
     best_result: dict | None = None
@@ -238,7 +261,7 @@ def evaluate_topic_configs(
 
         num_clusters, num_noise, noise_percent, largest_real, sil_score = compute_clustering_metrics(
             labels,
-            embeddings_reduced,
+            embeddings_full,
         )
 
         print(
@@ -350,6 +373,7 @@ def process_topic(
         topic_name=topic_name,
         topic_size=len(df_topic),
         embeddings_reduced=embeddings_reduced,
+        embeddings_full=embeddings,
     )
     labelled_topic, next_offset = apply_best_labels(
         df_topic=df_topic,

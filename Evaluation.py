@@ -91,18 +91,31 @@ if os.path.exists(cluster_csv):
             continue
 
         topic_rows = clustered_df[
-            (clustered_df["topic_group"] == topic_name) &
-            (clustered_df["cluster"] != -1)
+            clustered_df["topic_group"] == topic_name
         ].copy().reset_index(drop=True)
 
         if len(topic_rows) == 0:
+            print("  No rows for this topic.")
+            continue
+
+        if len(embeddings) != len(topic_rows):
+            usable_len = min(len(embeddings), len(topic_rows))
+            print(
+                "  WARNING: Embedding row count does not match topic rows "
+                f"({len(embeddings)} != {len(topic_rows)}). "
+                f"Using first {usable_len} aligned rows."
+            )
+            embeddings = embeddings[:usable_len]
+            topic_rows = topic_rows.iloc[:usable_len].reset_index(drop=True)
+
+        real_topic_rows = topic_rows[topic_rows["cluster"] != -1]
+        if len(real_topic_rows) == 0:
             print("  No rows with real clusters.")
             continue
 
         for cluster_id in sorted(topic_rows["cluster"].unique()):
-            idx = topic_rows.index[topic_rows["cluster"] == cluster_id].tolist()
-            idx = [i for i in idx if i < len(embeddings)]
-            if len(idx) < 2:
+            idx = np.flatnonzero(topic_rows["cluster"].to_numpy() == cluster_id)
+            if len(idx) < 2 or cluster_id == -1:
                 continue
 
             cluster_emb = embeddings[idx]
@@ -120,8 +133,15 @@ if os.path.exists(cluster_csv):
         # Print summary for this topic
         topic_cosines = [r for r in cosine_records if r["topic_group"] == topic_name]
         if topic_cosines:
-            mean_all = np.mean([r["mean_intra_cosine"] for r in topic_cosines])
-            print(f"  Clusters: {len(topic_cosines)}, Mean cosine: {mean_all:.4f}")
+            weights = np.array([r["cluster_size"] for r in topic_cosines], dtype=float)
+            values = np.array([r["mean_intra_cosine"] for r in topic_cosines], dtype=float)
+            mean_all = np.mean(values)
+            weighted_all = float(np.average(values, weights=weights)) if weights.sum() > 0 else mean_all
+            print(
+                f"  Clusters: {len(topic_cosines)}, "
+                f"Mean cosine: {mean_all:.4f}, "
+                f"Weighted cosine: {weighted_all:.4f}"
+            )
 else:
     print(f"Clustered CSV not found at {cluster_csv}")
 
@@ -146,7 +166,9 @@ if os.path.exists(temporal_path):
     merged = temporal_df.copy()
     if not cosine_df.empty:
         merged = merged.merge(
-            cosine_df[["cluster", "mean_intra_cosine"]], on="cluster", how="left"
+            cosine_df[["topic_group", "cluster", "mean_intra_cosine"]],
+            on=["topic_group", "cluster"],
+            how="left",
         )
 
     suspicious = merged[merged["burst_score"] > 0].sort_values(
