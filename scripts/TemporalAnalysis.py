@@ -222,11 +222,12 @@ def kleinberg_burst(event_times, s=2.0, gamma=1.0, freq="D"):
             floored = dates.dt.to_period("W").apply(lambda p: p.start_time)
         else:
             floored = dates.dt.floor("D")
-        daily = floored.value_counts().sort_index()
-        r = daily.values.astype(float)
-        n = len(r)
         rng_freq = "7D" if freq == "W" else "D"
-        d = len(pd.date_range(daily.index.min(), daily.index.max(), freq=rng_freq))
+        full_index = pd.date_range(floored.min(), floored.max(), freq=rng_freq)
+        counts = floored.value_counts().sort_index().reindex(full_index, fill_value=0)
+        r = counts.values.astype(float)
+        n = len(r)
+        d = len(full_index)
 
         if n < 2 or d < 2:
             return 0, []
@@ -239,7 +240,9 @@ def kleinberg_burst(event_times, s=2.0, gamma=1.0, freq="D"):
         burst_start = None
         burst_level = 0
         for i, lv in enumerate(q):
-            date = daily.index[i]
+            if i >= len(full_index):
+                break
+            date = full_index[i]
             if lv >= 1 and not in_burst:
                 in_burst = True
                 burst_start = date
@@ -247,10 +250,10 @@ def kleinberg_burst(event_times, s=2.0, gamma=1.0, freq="D"):
             elif lv >= 1 and in_burst:
                 burst_level = max(burst_level, int(lv))
             elif lv < 1 and in_burst:
-                periods.append((burst_start, daily.index[i - 1], burst_level))
+                periods.append((burst_start, full_index[i - 1], burst_level))
                 in_burst = False
         if in_burst:
-            periods.append((burst_start, daily.index[-1], burst_level))
+            periods.append((burst_start, full_index[min(len(q), len(full_index)) - 1], burst_level))
 
         return level_max, periods
     except (ImportError, Exception):
