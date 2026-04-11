@@ -18,6 +18,10 @@ import pandas as pd
 
 warnings.filterwarnings("ignore")
 
+# Ensure cluster titles with non-ASCII characters do not crash Windows console output.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 # ---------------------------------------------------------------------------
 # PATHS & CONFIG
 # ---------------------------------------------------------------------------
@@ -33,18 +37,27 @@ TEMPORAL_STATS_COLUMNS = [
     "topic_group",
     "total_articles",
     "timestamped_articles",
+    "timestamp_coverage_ratio",
     "first_seen",
     "last_seen",
     "span_days",
     "temporal_spread_days",
+    "active_days",
+    "peak_day_count",
+    "peak_day_share",
+    "peak_to_baseline_ratio",
     "burst_score_daily",
     "burst_duration_daily",
     "burst_periods_daily",
+    "burst_duration_share_daily",
     "burst_score_weekly",
     "burst_duration_weekly",
     "burst_periods_weekly",
+    "burst_duration_share_weekly",
     "burst_stable",
     "concentration",
+    "support_weight",
+    "coverage_weight",
     "suspicion_score",
     "representative_title",
     "burst_score",
@@ -223,6 +236,7 @@ for i, cluster_id in enumerate(cluster_ids):
 
     article_count_ts = len(sub)  # articles WITH timestamp
     total_articles = all_cluster_sizes.get(cluster_id, article_count_ts)
+    timestamp_coverage_ratio = article_count_ts / max(total_articles, 1)
     first_seen = times.min()
     last_seen = times.max()
     span_days = max((last_seen - first_seen).days, 1)
@@ -231,6 +245,13 @@ for i, cluster_id in enumerate(cluster_ids):
     temporal_spread = times.apply(lambda t: (t - first_seen).days).std()
     if pd.isna(temporal_spread):
         temporal_spread = 0.0
+
+    daily_counts = times.dt.floor("D").value_counts().sort_index()
+    active_days = int(len(daily_counts))
+    peak_day_count = int(daily_counts.max()) if active_days > 0 else 0
+    peak_day_share = peak_day_count / max(article_count_ts, 1)
+    baseline_per_day = article_count_ts / max(span_days, 1)
+    peak_to_baseline_ratio = peak_day_count / max(baseline_per_day, 1e-9)
 
     # ---- DAILY burst detection ----
     burst_daily, burst_periods_daily = kleinberg_burst(times, s=BURST_S, gamma=BURST_GAMMA, freq="D")
@@ -255,41 +276,62 @@ for i, cluster_id in enumerate(cluster_ids):
     # Concentration: timestamped articles / span_days
     concentration = article_count_ts / max(span_days, 1)
 
-    # Improved suspicion score:
-    #   - Higher for burst at both granularities
-    #   - Penalize very small clusters (< 5 timestamped articles)
-    #   - Factor in total cluster size
-    size_factor = min(total_articles / 20, 5.0)  # caps at 5x for clusters >= 100
-    small_penalty = max(0, 5 - article_count_ts) * 2  # penalty for < 5 timestamped articles
+    # Confidence weights keep sparse / low-coverage clusters from over-ranking.
+    support_weight = min(1.0, article_count_ts / 10.0)
+    coverage_weight = min(1.0, 0.35 + (0.65 * timestamp_coverage_ratio))
+    burst_duration_share_daily = burst_dur_daily / max(span_days, 1)
+    burst_duration_share_weekly = min((burst_dur_weekly * 7) / max(span_days, 1), 1.0)
 
-    suspicion_score = round(
-        (burst_daily * 10)
-        + (burst_weekly * 5)
-        + (burst_stable * 10)
-        + (concentration * 2)
-        + (burst_dur_daily * 0.5)
-        + (size_factor * 1.5)
-        - small_penalty,
-        3
+    # Improved suspicion score:
+    #   - Requires both enough timestamp support and reasonable coverage
+    #   - Rewards short, concentrated bursts more than long diffuse spans
+    burst_signal = (
+        (burst_daily * 4.0)
+        + (burst_weekly * 3.0)
+        + (burst_stable * 4.0)
     )
+    concentration_signal = math.log1p(concentration) * 2.0
+    peak_signal = (math.log1p(peak_to_baseline_ratio) * 2.5) + (peak_day_share * 3.0)
+    duration_signal = (burst_duration_share_daily * 2.5) + (burst_duration_share_weekly * 1.5)
+    size_signal = math.log1p(total_articles) * 0.75
+    support_penalty = max(0, 6 - article_count_ts) * 0.75
+
+    suspicion_raw = (
+        burst_signal
+        + concentration_signal
+        + peak_signal
+        + duration_signal
+        + size_signal
+    )
+    suspicion_score = max(0.0, (suspicion_raw * support_weight * coverage_weight) - support_penalty)
+    suspicion_score = round(suspicion_score, 3)
 
     records.append({
         "cluster": cluster_id,
         "topic_group": topic,
         "total_articles": total_articles,
         "timestamped_articles": article_count_ts,
+        "timestamp_coverage_ratio": round(timestamp_coverage_ratio, 4),
         "first_seen": first_seen.date() if pd.notna(first_seen) else None,
         "last_seen": last_seen.date() if pd.notna(last_seen) else None,
         "span_days": span_days,
         "temporal_spread_days": round(temporal_spread, 2),
+        "active_days": active_days,
+        "peak_day_count": peak_day_count,
+        "peak_day_share": round(peak_day_share, 4),
+        "peak_to_baseline_ratio": round(peak_to_baseline_ratio, 4),
         "burst_score_daily": burst_daily,
         "burst_duration_daily": burst_dur_daily,
         "burst_periods_daily": len(burst_periods_daily),
+        "burst_duration_share_daily": round(burst_duration_share_daily, 4),
         "burst_score_weekly": burst_weekly,
         "burst_duration_weekly": burst_dur_weekly,
         "burst_periods_weekly": len(burst_periods_weekly),
+        "burst_duration_share_weekly": round(burst_duration_share_weekly, 4),
         "burst_stable": burst_stable,
         "concentration": round(concentration, 4),
+        "support_weight": round(support_weight, 4),
+        "coverage_weight": round(coverage_weight, 4),
         "suspicion_score": suspicion_score,
         "representative_title": rep_title,
     })
@@ -312,14 +354,16 @@ stats_df["num_burst_periods"] = stats_df["burst_periods_daily"]
 # REPORT
 # ---------------------------------------------------------------------------
 print("\n" + "=" * 60)
-print("TEMPORAL STATS — TOP 20 MOST SUSPICIOUS CLUSTERS")
+print("TEMPORAL STATS - TOP 20 MOST SUSPICIOUS CLUSTERS")
 print("=" * 60)
 for _, row in stats_df.head(20).iterrows():
     title = str(row.get("representative_title", ""))[:60]
     print(
         f"  Cluster {int(row['cluster']):4d} | {str(row['topic_group']):15s} "
         f"| total={int(row['total_articles']):5d} | ts={int(row['timestamped_articles']):4d} "
+        f"| cov={row['timestamp_coverage_ratio']:.2f} | support={row['support_weight']:.2f} "
         f"| burst_d={int(row['burst_score_daily'])} burst_w={int(row['burst_score_weekly'])} "
+        f"| peakx={row['peak_to_baseline_ratio']:.1f} "
         f"| stable={int(row['burst_stable'])} "
         f"| susp={row['suspicion_score']:.1f} | {title}"
     )

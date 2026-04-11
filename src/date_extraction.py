@@ -1,9 +1,14 @@
 """Date extraction utilities from URLs and text."""
 
 import re
+from urllib.parse import parse_qs, unquote, urlparse
 import pandas as pd
 from pandas import Timestamp
-from .config import ROMANIAN_MONTHS
+from .config import (
+    ROMANIAN_MONTHS,
+    TIMESTAMP_SOURCE_MISSING,
+    TIMESTAMP_SOURCE_URL,
+)
 
 TimestampOrNaT = Timestamp | type(pd.NaT)
 
@@ -11,6 +16,29 @@ TEXT_DATE_SCAN_CHARS = 220
 TEXT_DATE_MAX_POSITION = 120
 TEXT_DATE_MIN_YEAR = 2015
 TEXT_DATE_MAX_YEAR_FUTURE_OFFSET = 1
+
+URL_DATE_PATTERNS = (
+    re.compile(
+        r"(?<!\d)(20\d{2})[\/._-](0?[1-9]|1[0-2])[\/._-](0?[1-9]|[12]\d|3[01])(?!\d)"
+    ),
+    re.compile(
+        r"(?<!\d)(0?[1-9]|[12]\d|3[01])[\/._-](0?[1-9]|1[0-2])[\/._-](20\d{2})(?!\d)"
+    ),
+)
+URL_QUERY_DATE_KEYS = {
+    "date",
+    "datetime",
+    "published",
+    "pubdate",
+    "publish_date",
+    "publishdate",
+    "timestamp",
+    "time",
+    "created",
+    "updated",
+    "article_date",
+    "news_date",
+}
 
 TEXT_DATE_CUES = (
     "publicat",
@@ -47,17 +75,87 @@ def _looks_like_metadata_date(text: str, match_start: int) -> bool:
     return any(cue in context for cue in TEXT_DATE_CUES)
 
 
-def extract_date_from_url(url) -> TimestampOrNaT:
-    """Extract date from URL patterns like /2021/03/23/ or /2021-03-23/"""
-    if pd.isna(url):
+def _extract_timestamp_from_url_candidate(candidate: str) -> TimestampOrNaT:
+    """Extract a timestamp from a URL path or a date-like query value."""
+    if not candidate:
         return pd.NaT
-    
-    url = str(url)
-    match = re.search(r"(20\d{2})[-/](\d{2})[-/](\d{2})", url)
-    
-    if match:
-        return _build_timestamp(match.group(1), match.group(2), match.group(3))
+
+    for pattern in URL_DATE_PATTERNS:
+        match = pattern.search(candidate)
+        if match:
+            if pattern.pattern.startswith("(?<!\\d)(20"):
+                return _build_timestamp(match.group(1), match.group(2), match.group(3))
+            return _build_timestamp(match.group(3), match.group(2), match.group(1))
+
+    compact_match = re.search(
+        r"(?<!\d)(20\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])(?!\d)",
+        candidate,
+    )
+    if compact_match:
+        return _build_timestamp(
+            compact_match.group(1),
+            compact_match.group(2),
+            compact_match.group(3),
+        )
+
     return pd.NaT
+
+
+def _extract_timestamp_from_query(query: str) -> TimestampOrNaT:
+    """Extract a timestamp from explicit date query parameters."""
+    if not query:
+        return pd.NaT
+
+    params = parse_qs(query, keep_blank_values=True)
+
+    year_values = params.get("year")
+    month_values = params.get("month")
+    day_values = params.get("day")
+    if year_values and month_values and day_values:
+        return _build_timestamp(
+            year_values[0],
+            month_values[0].zfill(2),
+            day_values[0].zfill(2),
+        )
+
+    for key, values in params.items():
+        if key.lower() in URL_QUERY_DATE_KEYS:
+            for value in values:
+                ts = _extract_timestamp_from_url_candidate(unquote(value))
+                if not pd.isna(ts):
+                    return ts
+
+    return pd.NaT
+
+
+def extract_date_from_url_with_source(url) -> tuple[TimestampOrNaT, str]:
+    """Extract date from a URL and return the extraction source."""
+    if pd.isna(url):
+        return pd.NaT, TIMESTAMP_SOURCE_MISSING
+
+    url = unquote(str(url))
+    parsed = urlparse(url if "://" in url else f"http://{url}")
+
+    for candidate in (parsed.path, parsed.fragment):
+        timestamp = _extract_timestamp_from_url_candidate(candidate)
+        if not pd.isna(timestamp):
+            return timestamp, TIMESTAMP_SOURCE_URL
+
+    timestamp = _extract_timestamp_from_query(parsed.query)
+    if not pd.isna(timestamp):
+        return timestamp, TIMESTAMP_SOURCE_URL
+
+    timestamp = _extract_timestamp_from_url_candidate(url)
+    if not pd.isna(timestamp):
+        return timestamp, TIMESTAMP_SOURCE_URL
+
+    return pd.NaT, TIMESTAMP_SOURCE_MISSING
+
+
+def extract_date_from_url(url) -> TimestampOrNaT:
+    """Extract date from URL patterns like /2021/03/23/ or /2021-03-23/."""
+    timestamp, _ = extract_date_from_url_with_source(url)
+    return timestamp
 
 
 def extract_date_from_text(text: str) -> TimestampOrNaT:

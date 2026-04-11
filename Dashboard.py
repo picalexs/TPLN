@@ -221,8 +221,18 @@ with tab1:
                         "burst_score", "burst_duration_days", "span_days",
                         "suspicion_score", "representative_title"]
         # Add new columns if they exist
-        for col in ["burst_score_daily", "burst_score_weekly", "burst_stable",
-                     "total_articles", "timestamped_articles"]:
+        for col in [
+            "burst_score_daily",
+            "burst_score_weekly",
+            "burst_stable",
+            "total_articles",
+            "timestamped_articles",
+            "timestamp_coverage_ratio",
+            "peak_day_share",
+            "peak_to_baseline_ratio",
+            "support_weight",
+            "coverage_weight",
+        ]:
             if col in temporal_df.columns and col not in display_cols:
                 display_cols.insert(-1, col)  # before representative_title
 
@@ -306,6 +316,11 @@ with tab2:
                 stable = "Yes" if row.get("burst_stable", 0) == 1 else "No"
                 mcol4.metric("Burst (D/W/Stable)", f"{burst_d}/{burst_w}/{stable}")
 
+                coverage_ratio = row.get("timestamp_coverage_ratio")
+                peak_ratio = row.get("peak_to_baseline_ratio")
+                support_weight = row.get("support_weight")
+                coverage_weight = row.get("coverage_weight")
+
                 st.markdown(f"""
                 **Cluster {sel_cluster_id}** - {row.get('topic_group', 'N/A')}
 
@@ -316,6 +331,9 @@ with tab2:
                 | Burst daily | {burst_d} |
                 | Burst weekly | {burst_w} |
                 | Burst stable | {stable} |
+                | Timestamp coverage | {f"{coverage_ratio:.1%}" if pd.notna(coverage_ratio) else "N/A"} |
+                | Peak / baseline | {f"{peak_ratio:.2f}" if pd.notna(peak_ratio) else "N/A"} |
+                | Support / coverage weight | {f"{support_weight:.2f} / {coverage_weight:.2f}" if pd.notna(support_weight) and pd.notna(coverage_weight) else "N/A"} |
                 | Representative | {str(row.get('representative_title', ''))[:120]} |
                 """)
 

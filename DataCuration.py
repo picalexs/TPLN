@@ -13,13 +13,42 @@ Outputs:
 import os
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 
+import sys
 from typing import cast
+from urllib.parse import urlparse
 import pandas as pd
+from src.config import (
+    TIMESTAMP_DOMAIN_MIN_ROWS_FOR_WEAKNESS,
+    TIMESTAMP_DOMAIN_REPORT_TOP_N,
+    TIMESTAMP_SOURCE_COLUMN,
+    TIMESTAMP_SOURCE_MISSING,
+    TIMESTAMP_SOURCE_TEXT,
+    TIMESTAMP_SOURCE_URL,
+)
 from src.paths import BASE_DIR, DATA_DIR, RAW_PARQUET, CLEAN_CSV
 from src.text_processing import (
     clean_text, remove_stopwords_and_clean
 )
-from src.date_extraction import extract_date_from_url, extract_date_from_text
+from src.date_extraction import extract_date_from_text, extract_date_from_url_with_source
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+
+def _extract_domain_from_url(url: str) -> str:
+    """Return a normalized domain for coverage reporting."""
+    if pd.isna(url):
+        return TIMESTAMP_SOURCE_MISSING
+
+    url = str(url).strip()
+    if not url:
+        return TIMESTAMP_SOURCE_MISSING
+
+    parsed = urlparse(url if "://" in url else f"http://{url}")
+    domain = parsed.netloc.lower()
+    if domain.startswith("www."):
+        domain = domain.removeprefix("www.")
+    return domain or TIMESTAMP_SOURCE_MISSING
 
 
 # =========================================================================
@@ -74,8 +103,15 @@ print("\nExtracting timestamps...")
 
 # Layer 1: from URL
 url_series = cast(pd.Series, train_df["url"])
-train_df["timestamp"] = url_series.apply(extract_date_from_url)  # type: ignore
-url_found = train_df["timestamp"].notna().sum()
+url_extraction = url_series.apply(extract_date_from_url_with_source)  # type: ignore
+url_extraction_df = pd.DataFrame(
+    url_extraction.tolist(),
+    index=train_df.index,
+    columns=["timestamp", TIMESTAMP_SOURCE_COLUMN],
+)
+train_df["timestamp"] = url_extraction_df["timestamp"]
+train_df[TIMESTAMP_SOURCE_COLUMN] = url_extraction_df[TIMESTAMP_SOURCE_COLUMN]
+url_found = (train_df[TIMESTAMP_SOURCE_COLUMN] == TIMESTAMP_SOURCE_URL).sum()
 print(f"  From URL:  {url_found} ({100 * url_found / len(train_df):.1f}%)")
 
 # Layer 2: from article text (for rows still missing timestamp)
@@ -85,12 +121,62 @@ if missing_mask.sum() > 0:
     text_series = cast(pd.Series, train_df.loc[missing_mask, "text"])
     text_dates = text_series.apply(extract_date_from_text)  # type: ignore
     train_df.loc[missing_mask, "timestamp"] = text_dates
-    text_found = text_dates.notna().sum()
+    text_found_mask = text_dates.notna()
+    train_df.loc[text_dates.index[text_found_mask], TIMESTAMP_SOURCE_COLUMN] = TIMESTAMP_SOURCE_TEXT
+    text_found = text_found_mask.sum()
     print(f"  From text: {text_found} ({100 * text_found / len(train_df):.1f}%)")
 
 total_found = train_df["timestamp"].notna().sum()
 print(f"  TOTAL:     {total_found} / {len(train_df)} ({100 * total_found / len(train_df):.1f}%)")
 print(f"  Missing:   {train_df['timestamp'].isna().sum()}")
+
+print("  Source breakdown:")
+source_counts = (
+    train_df[TIMESTAMP_SOURCE_COLUMN]
+    .fillna(TIMESTAMP_SOURCE_MISSING)
+    .value_counts()
+    .reindex(
+        [TIMESTAMP_SOURCE_URL, TIMESTAMP_SOURCE_TEXT, TIMESTAMP_SOURCE_MISSING],
+        fill_value=0,
+    )
+)
+for source, count in source_counts.items():
+    print(f"    {source:<8} {count:>6} ({100 * count / len(train_df):.1f}%)")
+
+domain_report_df = train_df.copy()
+domain_report_df["domain"] = domain_report_df["url"].apply(_extract_domain_from_url)
+domain_summary = (
+    domain_report_df.groupby("domain", dropna=False)
+    .agg(
+        rows=("domain", "size"),
+        timestamped=("timestamp", lambda s: s.notna().sum()),
+        url_source=("timestamp_source", lambda s: (s == TIMESTAMP_SOURCE_URL).sum()),
+        text_source=("timestamp_source", lambda s: (s == TIMESTAMP_SOURCE_TEXT).sum()),
+        missing_source=("timestamp_source", lambda s: (s == TIMESTAMP_SOURCE_MISSING).sum()),
+    )
+    .sort_values(["rows", "timestamped"], ascending=[False, False])
+)
+domain_summary["coverage_pct"] = 100 * domain_summary["timestamped"] / domain_summary["rows"]
+
+print("\nTop domains by volume:")
+print(
+    domain_summary.head(TIMESTAMP_DOMAIN_REPORT_TOP_N)[
+        ["rows", "timestamped", "coverage_pct", "url_source", "text_source", "missing_source"]
+    ].to_string(float_format=lambda value: f"{value:.1f}")
+)
+
+weak_domains = domain_summary[domain_summary["rows"] >= TIMESTAMP_DOMAIN_MIN_ROWS_FOR_WEAKNESS].sort_values(
+    ["coverage_pct", "rows"], ascending=[True, False]
+)
+if not weak_domains.empty:
+    print(
+        f"\nWeakest domains with at least {TIMESTAMP_DOMAIN_MIN_ROWS_FOR_WEAKNESS} rows:"
+    )
+    print(
+        weak_domains.head(TIMESTAMP_DOMAIN_REPORT_TOP_N)[
+            ["rows", "timestamped", "coverage_pct", "url_source", "text_source", "missing_source"]
+        ].to_string(float_format=lambda value: f"{value:.1f}")
+    )
 
 
 # =========================================================================
@@ -144,7 +230,8 @@ train_df = train_df[[
     "document",
     "short_document",
     "document_nostop",
-    "timestamp"
+    "timestamp",
+    TIMESTAMP_SOURCE_COLUMN,
 ]].copy()
 
 train_df.to_csv(CLEAN_CSV, index=False)

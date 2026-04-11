@@ -10,7 +10,6 @@ SBERT_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 # =========================================================================
 TEXT_COLUMN = "short_document"
 MIN_TOPIC_SIZE = 200
-MAX_ROWS = 15000
 
 # HDBSCAN configurations for hyperparameter sweep
 HDBSCAN_DEFAULT_CONFIGS = [
@@ -47,7 +46,7 @@ COLUMNS_TO_CLEAN = [
 COLUMNS_TO_PRESERVE = [
     "title", "text", "summary", "keywords", "topics",
     "dialect", "url", "author", "document", "short_document",
-    "document_nostop", "timestamp"
+    "document_nostop", "timestamp", "timestamp_source"
 ]
 
 # =========================================================================
@@ -77,3 +76,18 @@ ROMANIAN_MONTHS = {
     "mai": "05", "iunie": "06", "iulie": "07", "august": "08",
     "septembrie": "09", "octombrie": "10", "noiembrie": "11", "decembrie": "12",
 }
+
+# =========================================================================
+# TIMESTAMP COVERAGE
+# =========================================================================
+TIMESTAMP_SOURCE_COLUMN = "timestamp_source"
+TIMESTAMP_SOURCE_URL = "url"
+TIMESTAMP_SOURCE_TEXT = "text"
+TIMESTAMP_SOURCE_MISSING = "missing"
+TIMESTAMP_SOURCE_VALUES = (
+    TIMESTAMP_SOURCE_URL,
+    TIMESTAMP_SOURCE_TEXT,
+    TIMESTAMP_SOURCE_MISSING,
+)
+TIMESTAMP_DOMAIN_REPORT_TOP_N = 15
+TIMESTAMP_DOMAIN_MIN_ROWS_FOR_WEAKNESS = 20

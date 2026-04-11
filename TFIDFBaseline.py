@@ -27,7 +27,7 @@ from sklearn.decomposition import TruncatedSVD
 from sklearn.metrics import silhouette_score, davies_bouldin_score
 
 from src.config import (
-    MAX_ROWS, MIN_TOPIC_SIZE,
+    MIN_TOPIC_SIZE,
     TFIDF_MAX_FEATURES, TFIDF_NGRAM, TOP_TERMS_PER_CLUSTER
 )
 from src.paths import (
@@ -63,7 +63,7 @@ def build_metric_space(X_sparse):
 if not os.path.exists(CLEAN_CSV):
     raise FileNotFoundError(f"Cleaned CSV not found at {CLEAN_CSV}. Run DataCuration.py first.")
 
-df = load_clean_csv(nrows=MAX_ROWS)
+df = load_clean_csv()
 
 df["document_nostop"] = df["document_nostop"].fillna("").astype(str)
 df["topics"] = df["topics"].fillna("").astype(str)
