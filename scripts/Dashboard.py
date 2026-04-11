@@ -5,13 +5,18 @@ Interactive dashboard for exploring coordinated campaign detection results.
 Loads parquet-backed dashboard assets prepared by PrepareDashboardData.py.
 
 Run with:
-    python PrepareDashboardData.py
-    streamlit run Dashboard.py
+    python scripts/PrepareDashboardData.py
+    streamlit run scripts/Dashboard.py
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+import sys
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 import pandas as pd
 import plotly.express as px
@@ -361,8 +366,8 @@ if missing_assets:
         "Fast dashboard assets are missing.\n\n"
         "Run this once after your pipeline finishes:\n\n"
         "```bash\n"
-        "python PrepareDashboardData.py\n"
-        "streamlit run Dashboard.py\n"
+        "python scripts/PrepareDashboardData.py\n"
+        "streamlit run scripts/Dashboard.py\n"
         "```"
     )
     with st.expander("Missing assets"):
@@ -804,7 +809,10 @@ else:
             fig_db.update_traces(texttemplate="%{text:.3f}", textposition="auto")
             st.plotly_chart(fig_db, use_container_width=True)
     else:
-        st.info("Ablation report not found. Run TFIDFBaseline.py and then PrepareDashboardData.py.")
+        st.info(
+            "Ablation report not found. Run scripts/TFIDFBaseline.py and then "
+            "scripts/PrepareDashboardData.py."
+        )
 
     if not eval_df.empty:
         st.subheader("Detailed Evaluation Report")

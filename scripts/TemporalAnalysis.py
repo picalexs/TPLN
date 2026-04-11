@@ -12,10 +12,15 @@ Outputs:
 import argparse
 import sys
 import math
+from pathlib import Path
 import warnings
 from urllib.parse import urlparse
 import numpy as np
 import pandas as pd
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from src.paths import CLUSTERED_PARQUET, TEMPORAL_DIR, TEMPORAL_STATS
 from src.runtime_profile import apply_runtime_profile, detect_runtime_profile, format_runtime_profile
@@ -160,7 +165,7 @@ def _normalized_entropy(series):
 if not TEMPORAL_INPUT.exists():
     raise FileNotFoundError(
         f"Clustered dataset not found at {CLUSTERED_PARQUET}.\n"
-        "Run EmbeddingsClustering.py first."
+        "Run scripts/EmbeddingsClustering.py first."
     )
 
 df = pd.read_parquet(TEMPORAL_INPUT)

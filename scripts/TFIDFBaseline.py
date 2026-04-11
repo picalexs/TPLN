@@ -13,6 +13,8 @@ Output:
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
+import sys
 from time import perf_counter
 from typing import Any, cast
 import warnings
@@ -24,6 +26,10 @@ from sklearn.cluster import KMeans, MiniBatchKMeans
 from sklearn.decomposition import TruncatedSVD
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics import davies_bouldin_score, silhouette_score
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from src.config import MIN_TOPIC_SIZE, TFIDF_MAX_FEATURES, TFIDF_NGRAM, TOP_TERMS_PER_CLUSTER
 from src.io_utils import load_clean_data

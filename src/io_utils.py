@@ -8,13 +8,13 @@ from .paths import CLEAN_PARQUET
 def load_clean_data(nrows=None, columns=None):
     """Load the cleaned dataset with optional row limit and column subset.
 
-    Assumes data has already been cleaned by DataCuration.py.
+    Assumes data has already been cleaned by scripts/DataCuration.py.
     Fills NaN values in required text columns and validates the expected schema.
     """
     if not os.path.exists(CLEAN_PARQUET):
         raise FileNotFoundError(
             f"Cleaned dataset not found at {CLEAN_PARQUET}.\n"
-            "Run DataCuration.py first."
+            "Run scripts/DataCuration.py first."
         )
 
     df = pd.read_parquet(CLEAN_PARQUET, columns=columns)
@@ -31,7 +31,7 @@ def load_clean_data(nrows=None, columns=None):
     if missing_cols:
         raise ValueError(
             "Cleaned parquet is missing required columns: "
-            f"{', '.join(missing_cols)}. Re-run DataCuration.py."
+            f"{', '.join(missing_cols)}. Re-run scripts/DataCuration.py."
         )
 
     for col in required_for_this_load:

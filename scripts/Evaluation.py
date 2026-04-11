@@ -14,10 +14,15 @@ import argparse
 import glob
 import warnings
 from pathlib import Path
+import sys
 
 import numpy as np
 import pandas as pd
 from sklearn.metrics.pairwise import cosine_similarity
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from src.paths import CLUSTERED_PARQUET, EMB_DIR, EVALUATION_REPORT, HDBSCAN_CONFIG_RESULTS, TEMPORAL_STATS
 from src.runtime_profile import apply_runtime_profile, detect_runtime_profile, format_runtime_profile

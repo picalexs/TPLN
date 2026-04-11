@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import shutil
 from pathlib import Path
+import sys
 from typing import Any, Iterator
 from urllib.parse import urlparse
 
@@ -12,6 +13,10 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from src.paths import (
     CLUSTERED_PARQUET,
@@ -140,7 +145,7 @@ def _iter_cluster_input_frames(
     chunk_size: int,
 ) -> Iterator[pd.DataFrame]:
     if input_path.suffix.lower() != ".parquet":
-        raise ValueError("PrepareDashboardData.py only supports parquet inputs.")
+        raise ValueError("scripts/PrepareDashboardData.py only supports parquet inputs.")
 
     parquet_file = pq.ParquetFile(str(input_path))
     for batch in parquet_file.iter_batches(batch_size=chunk_size, columns=read_columns):
@@ -808,7 +813,7 @@ def main() -> int:
 
     if not args.input.exists():
         raise FileNotFoundError(
-            f"Clustered parquet not found at {args.input}. Run EmbeddingsClustering.py first."
+            f"Clustered parquet not found at {args.input}. Run scripts/EmbeddingsClustering.py first."
         )
 
     result = build_dashboard_assets(

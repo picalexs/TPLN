@@ -17,9 +17,14 @@ import argparse
 import os
 import re
 import sys
+from pathlib import Path
 from typing import Any, cast
 
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 import faiss
 import hdbscan
@@ -75,7 +80,7 @@ def load_input_data(nrows: int | None = None) -> pd.DataFrame:
     if not CLEAN_PARQUET.exists():
         raise FileNotFoundError(
             f"Cleaned dataset not found at {CLEAN_PARQUET}.\n"
-            "Run DataCuration.py first."
+            "Run scripts/DataCuration.py first."
         )
 
     df = load_clean_data(nrows=nrows)
