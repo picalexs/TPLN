@@ -1,0 +1,156 @@
+
+--- Start of Project_5_Description.pdf ---
+
+Proiect 5 — Detectarea campaniilor coordonate: clusterizare 
+semantică și analiză temporală (bursts) 
+1.​
+Descriere 
+Proiectul urmărește identificarea campaniilor coordonate într-un flux de texte (postări, 
+comentarii, știri) prin combinarea similarității semantice cu analiza temporală. Spre deosebire de 
+deduplicarea exactă, abordarea bazată pe embeddings permite gruparea mesajelor care transmit 
+același conținut în formulări diferite [1]. Pentru componenta temporală, modelul clasic de 
+detectare a „burst”-urilor oferă un cadru formal pentru identificarea intensificărilor de activitate 
+în timp [2]. 
+2.​
+Resurse necesare și surse de date (download) 
+Corpus text: (i) știri românești (RoLargeSum) ca sursă de text; (ii) date cu timestamp 
+(colectare controlată) pentru scenarii sociale [3]. 
+Pentru evaluare: set de studii de caz (evenimente) + validare manuală a clusterelor 
+suspecte. În lipsa ground truth, se recomandă evaluare intrinsecă (coeziune cluster) și evaluare 
+expert (interpretabilitate). 
+3.​
+Metodă 
+3.1.​
+Embeddings: se encodează fiecare mesaj cu Sentence-BERT (sau variantă 
+multilinguală) [1]. 
+3.2.​
+Căutare vecini: se indexează vectorii cu FAISS pentru căutare rapidă la scară [4]. 
+3.3.​
+Clustering: HDBSCAN este adecvat pentru densități diferite și pentru a evita 
+alegerea manuală a lui K [5]. 
+3.4.​
+Analiză temporală: pentru fiecare cluster se construiește o serie temporală; se 
+calculează scor de burst (Kleinberg) și măsuri de concentrare temporală [2]. 
+3.5.​
+Raportare: se extrag exemple reprezentative și se explică scorul (similaritate + 
+sincronizare). 
+
+4.​
+Evaluare 
+4.1.​
+Coeziune cluster: densitate, silhouette (unde e aplicabil), consistență semantică. 
+4.2.​
+Coordonare temporală: scor de burst și stabilitate pe ferestre diferite. 
+4.3.​
+Ablații: TF-IDF vs embeddings; KMeans vs HDBSCAN; cu/ fără burst scoring. 
+5.​
+Tehnologii 
+5.1.​
+Sentence-transformers; FAISS; HDBSCAN; pandas; Plotly/Streamlit pentru 
+vizualizare [6]. 
+6.​
+Livrabile 
+6.1.​
+Pipeline embedding→index→clustering→burst. 
+6.2.​
+Dashboard: clustere + timeline + scoruri. 
+6.3.​
+Raport: top campanii cu evidențe (mesaje, perioade, explicații). 
+Bibliografie 
+1.​ Reimers, 
+N., 
+& 
+Gurevych, 
+I. 
+(2019). 
+Sentence-BERT. 
+arXiv. 
+Link: 
+https://arxiv.org/abs/1908.10084  
+2.​ Kleinberg, J. (2003). Bursty and Hierarchical Structure in Streams. Cornell. Link: 
+https://www.cs.cornell.edu/home/kleinber/bhs.pdf  
+3.​ Avram, 
+A. 
+M. 
+et 
+al. 
+RoLargeSum 
+dataset 
+(repo). 
+Link: 
+https://github.com/avramandrei/rolargesum  
+4.​ FAISS (Meta AI) repository. Link: https://github.com/facebookresearch/faiss  
+5.​ HDBSCAN library repository. Link: https://github.com/scikit-learn-contrib/hdbscan  
+6.​ Streamlit Documentation. Link: https://docs.streamlit.io/  
+
+
+--- End of Project_5_Description.pdf ---
+
+--- Start of Project_5_Details.docx ---
+
+Detecting Coordinated Campaigns: Semantic Clustering and Temporal Analysis (Bursts) 
+Cotea Carla, Ginghina Mihai, Hriscu Cosmin, Picioroaga Alexandru, Smau Robert
+Abstract:
+
+This project presents a robust pipeline for detecting coordinated information campaigns within continuous text streams by combining semantic similarity with temporal analysis. Utilizing the RoLargeSum dataset and timestamped social data, the initial phase focuses on preprocessing the corpus to clean the raw input and apply proper tokenization for downstream modeling. Rather than relying on exact deduplication, we leverage multilingual Sentence-BERT embeddings to capture deep semantic meaning, successfully grouping messages that share identical narratives despite varied phrasing.
+To handle this data at scale, the dense vectors are indexed via FAISS for rapid nearest-neighbor retrieval. We then apply HDBSCAN clustering to automatically identify dense semantic communities without predefining the number of clusters. To establish coordination, we construct a discrete time series for each semantic cluster and apply the Kleinberg model to calculate temporal burst scores, formally identifying unnatural spikes in activity. By unifying semantic cohesion with temporal synchronization, this methodology reliably isolates highly suspicious clusters, providing a scalable unsupervised foundation that can directly inform the downstream classification of coordinated inauthentic behavior.
+
+Keywords: tokenization, classification, coordinated campaigns , semantic embeddings , burst detection , HDBSCAN clustering , temporal analysis
+Understanding the requirements
+Briefly describe what you understood from the given assignment:
+As we understood, this project is about identifying messages that convey the same narrative or core idea, even when they are phrased differently, and then checking whether such similar messages appear in concentrated time periods (aka, political campaigns)
+What are the main objectives you need to achieve?
+The main objectives are to clean and preprocess the dataset, represent the texts in a way that captures their semantic meaning, and group together messages that express the same narrative even if they are worded differently. In addition, we need to analyze the temporal distribution of these grouped messages in order to detect bursts of activity that may signal coordinated behavior. Based on this combined semantic and temporal analysis, the final objective is to identify potential political campaigns and classify them according to their type or narrative.
+Implementation planning
+What technologies or programming languages do you intend to use?
+-python
+-Beto
+-Kleinberg Model
+-TF-IDF
+-KMeans
+What libraries or frameworks do you consider useful for your project?
+-pandas
+-numpy
+-sentence-transformers
+-FAISS
+-HDBSCAN
+-plotly
+-streamlit
+How will you organize the implementation stages?
+Phase 1: Requesting access to the dataset
+Phase 2: Cleaning the text
+Phase 3: Embedding generation with multilingual Sentence-BERT
+Phase 4: Vector indexing with FAISS and semantic clustering with HDBSCAN
+Phase 5: Temporal analysis and burst scoring for each cluster
+Phase 6: Evaluation and ablation studies
+Phase 7: Dashboard development and result visualization
+Phase 8: Final report and delivery
+
+What are the main technical challenges you anticipate?
+
+The main technical challenges we anticipate are cleaning noisy data, correctly grouping texts that express the same idea in different ways, and separating real coordinated campaigns from normal discussion around popular topics. We may also face difficulties in detecting meaningful temporal bursts and in defining clear categories for each campaign type.
+How will you manage resources and allocate time for each phase?
+
+
+A week for each phase is organized as follows.
+
+How will you distribute responsibilities for each teammate? (please specify explicitly for each one).
+
+M1 (mihai?): Data Preparation and Embedding Generation 
+
+Download and prepare the required text corpora, specifically the Romanian news dataset (RoLargeSum) and timestamped social data. Implement the embedding generation pipeline. Encode every message using Sentence-BERT
+
+M2(carla?): Vector Indexing and Semantic Clustering
+Set up and configure FAISS to index the vectors, allowing for rapid nearest-neighbor search at scale. Build the FAISS index for efficient nearest-neighbor search and apply HDBSCAN to group semantically similar vectors into clusters. Utilize HDBSCAN specifically because it handles varying densities well and removes the need to manually choose the number of clusters (K)
+M3: Temporal Analysis and Burst Detection
+Build a specific time series for each individual cluster identified in the previous step. Calculate the burst score using the Kleinberg model to identify sudden intensifications in activity. Compute additional measures of temporal concentration for the clusters.
+M4: Evaluation and Ablation Studies 
+Measure the cohesion of your clusters using metrics like density, silhouette score (where applicable), and semantic consistency. Evaluate the temporal coordination by checking the burst scores and their stability across different time windows. Run comparative tests, specifically looking at TF-IDF versus embeddings, KMeans versus HDBSCAN, and the impact of including versus excluding the burst scoring.
+M5: Dashboard Visualization and Final Reporting
+Build an interactive dashboard using Streamlit and Plotly. Ensure the dashboard visually displays the clusters, the timeline of events, and the calculated scores.
+
+
+
+
+
+--- End of Project_5_Details.docx ---
