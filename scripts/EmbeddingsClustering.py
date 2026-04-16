@@ -313,7 +313,10 @@ def evaluate_topic_configs(
             "min_samples": cfg["min_samples"],
             "metric": "euclidean",
             "prediction_data": True,
-            "core_dist_n_jobs": core_dist_n_jobs,
+            # On Windows, joblib multiprocessing uses Win32 IPC pipes that overflow
+            # (WinError 1450) when pickling large KD-tree payloads.  Force single-
+            # threaded core-distance computation; the tree build itself is fast enough.
+            "core_dist_n_jobs": 1 if sys.platform == "win32" else core_dist_n_jobs,
         }
         if "cluster_selection_epsilon" in cfg:
             clusterer_kwargs["cluster_selection_epsilon"] = cfg["cluster_selection_epsilon"]
