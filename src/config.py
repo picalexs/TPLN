@@ -60,7 +60,7 @@ TOP_TERMS_PER_CLUSTER = 10
 # =========================================================================
 COLUMNS_TO_CLEAN = [
     "title", "text", "summary", "keywords", "topics",
-    "dialect", "url", "author"
+    "dialect", "author"
 ]
 
 COLUMNS_TO_PRESERVE = [

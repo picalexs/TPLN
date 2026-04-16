@@ -41,5 +41,11 @@ def load_clean_data(nrows=None, columns=None):
 
 
 def load_clean_csv(nrows=None):
-    """Backward-compatible alias for loading the cleaned dataset."""
+    """Deprecated alias for load_clean_data(). Will be removed in a future version."""
+    import warnings
+    warnings.warn(
+        "load_clean_csv() is deprecated. Use load_clean_data() instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     return load_clean_data(nrows=nrows)
