@@ -128,23 +128,30 @@ def detect_runtime_profile(
     gpu_memory_gb: float | None = None
     system_gpu_name, system_gpu_memory_gb = _probe_nvidia_smi()
 
-    try:
-        import torch  # type: ignore[import-not-found]
+    # Only import torch when the caller may actually need GPU acceleration.
+    # CPU-only scripts (PrepareDashboardData, Evaluation, TemporalAnalysis) pass
+    # device="cpu" explicitly — importing torch there wastes several seconds and
+    # can hang on machines with broken CUDA driver DLLs.
+    _needs_gpu_probe = device.lower().strip() in {"auto", "cuda", "mps"}
 
-        torch_module = torch
-        torch_cuda_available = bool(torch.cuda.is_available())
-        torch_mps_available = bool(
-            getattr(torch.backends, "mps", None) is not None
-            and torch.backends.mps.is_available()
-        )
-        if torch_cuda_available:
-            gpu_name = torch.cuda.get_device_name(0)
-            gpu_memory_gb = round(
-                torch.cuda.get_device_properties(0).total_memory / (1024 ** 3),
-                2,
+    try:
+        if _needs_gpu_probe:
+            import torch  # type: ignore[import-not-found]
+
+            torch_module = torch
+            torch_cuda_available = bool(torch.cuda.is_available())
+            torch_mps_available = bool(
+                getattr(torch.backends, "mps", None) is not None
+                and torch.backends.mps.is_available()
             )
-        elif torch_mps_available:
-            gpu_name = "Apple Silicon GPU"
+            if torch_cuda_available:
+                gpu_name = torch.cuda.get_device_name(0)
+                gpu_memory_gb = round(
+                    torch.cuda.get_device_properties(0).total_memory / (1024 ** 3),
+                    2,
+                )
+            elif torch_mps_available:
+                gpu_name = "Apple Silicon GPU"
     except Exception:
         torch_module = None
 
