@@ -13,6 +13,7 @@ Output:
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 import sys
 from time import perf_counter
@@ -286,7 +287,7 @@ def main() -> int:
     sbert_progress = tqdm(eligible_topics, desc="SBERT topics", unit="topic")
     for topic_idx, topic in enumerate(sbert_progress, start=1):
         topic_name = str(topic)
-        safe_topic = topic_name.replace("/", "_").replace(" ", "_")
+        safe_topic = re.sub(r"[^A-Za-z0-9._-]+", "_", topic_name).strip("_")
         emb_path = EMB_DIR / f"{safe_topic}_embeddings.npy"
         if not emb_path.exists():
             print(f"\n--- Topic: {topic_name} - embeddings not found, skipping ---")

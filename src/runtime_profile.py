@@ -233,7 +233,7 @@ def detect_runtime_profile(
 def apply_runtime_profile(profile: RuntimeProfile) -> None:
     """Apply threading-related settings for CPU-bound libraries."""
 
-    os.environ["TOKENIZERS_PARALLELISM"] = "true"
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
     os.environ["OMP_NUM_THREADS"] = str(profile.cpu_threads)
     os.environ["MKL_NUM_THREADS"] = str(profile.cpu_threads)
     os.environ["OPENBLAS_NUM_THREADS"] = str(profile.cpu_threads)

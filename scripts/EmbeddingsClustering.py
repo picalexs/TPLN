@@ -435,6 +435,7 @@ def process_topic(
     batch_size: int,
     core_dist_n_jobs: int,
     global_cluster_offset: int,
+    debug_neighbors: bool = False,
 ) -> tuple[pd.DataFrame, list[dict[str, Any]], int]:
     print("\n" + "=" * 60)
     print(f"TOPIC_GROUP: {topic_name}")
@@ -450,8 +451,9 @@ def process_topic(
         topic_name=topic_name,
         batch_size=batch_size,
     )
-    index = build_faiss_index(embeddings)
-    print_neighbor_examples(index, embeddings, df_topic)
+    if debug_neighbors:
+        index = build_faiss_index(embeddings)
+        print_neighbor_examples(index, embeddings, df_topic)
 
     print("\nReducing dimensions with UMAP 15-D for clustering and scatter...")
     embeddings_reduced = fit_umap_for_clustering(embeddings, cpu_threads=core_dist_n_jobs)
@@ -559,6 +561,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cpu-threads", type=int, default=None)
     parser.add_argument("--embed-batch-size", type=int, default=None)
     parser.add_argument("--nrows", type=int, default=None, help="Optional row limit for quick tests")
+    parser.add_argument(
+        "--debug-neighbors",
+        action="store_true",
+        default=False,
+        help="Build FAISS index and print nearest-neighbor examples (high RAM; off by default)",
+    )
     return parser.parse_args()
 
 
@@ -596,6 +604,7 @@ def main() -> int:
             batch_size=profile.embedding_batch_size,
             core_dist_n_jobs=profile.cpu_threads,
             global_cluster_offset=global_cluster_offset,
+            debug_neighbors=args.debug_neighbors,
         )
         final_chunks.append(labelled_topic)
         all_results.extend(topic_results)

@@ -636,7 +636,7 @@ elif page == "Timeline and Bursts":
 
             weekly = (
                 cluster_daily.set_index("date")["article_count"]
-                .resample("W")
+                .resample("W-SUN")
                 .sum()
                 .reset_index()
                 .rename(columns={"article_count": "count", "date": "week"})

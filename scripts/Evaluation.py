@@ -29,6 +29,9 @@ from src.runtime_profile import apply_runtime_profile, detect_runtime_profile, f
 
 warnings.filterwarnings("ignore")
 
+SILHOUETTE_SAMPLE_SIZE = 5_000
+MAX_COSINE_SAMPLE = 2_000
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -138,6 +141,11 @@ def compute_intra_cluster_cosine() -> pd.DataFrame:
                 continue
 
             cluster_emb = embeddings[idx]
+            if len(cluster_emb) > MAX_COSINE_SAMPLE:
+                subsample_idx = np.random.default_rng(42).choice(
+                    len(cluster_emb), MAX_COSINE_SAMPLE, replace=False
+                )
+                cluster_emb = cluster_emb[subsample_idx]
             sim_matrix = cosine_similarity(cluster_emb)
             np.fill_diagonal(sim_matrix, np.nan)
             mean_sim = float(np.nanmean(sim_matrix))
