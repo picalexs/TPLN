@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import argparse
 import os
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 import sys
 from pathlib import Path
 from typing import cast
@@ -84,18 +84,20 @@ def build_document_nostop(series: pd.Series, cpu_threads: int, chunk_size: int) 
     if not values:
         return pd.Series(dtype="object", index=series.index)
 
-    if cpu_threads <= 1 or len(values) < max(chunk_size, 50_000):
+    if cpu_threads <= 1 or len(values) < 50_000:
         cleaned = [remove_stopwords_and_clean(value) for value in values]
         return pd.Series(cleaned, index=series.index, dtype="object")
 
-    worker_chunk_size = max(5_000, min(chunk_size, len(values) // max(cpu_threads * 4, 1)))
+    # One chunk per thread — avoids tiny tasks and keeps memory pressure flat
+    # because threads share the process address space (no per-worker DataFrame copy).
+    worker_chunk_size = max(5_000, (len(values) + cpu_threads - 1) // cpu_threads)
     worker_chunks = [
         values[start:start + worker_chunk_size]
         for start in range(0, len(values), worker_chunk_size)
     ]
 
     cleaned_values: list[str] = []
-    with ProcessPoolExecutor(max_workers=cpu_threads) as executor:
+    with ThreadPoolExecutor(max_workers=cpu_threads) as executor:
         for cleaned_chunk in executor.map(_clean_stopword_chunk, worker_chunks):
             cleaned_values.extend(cleaned_chunk)
 
