@@ -10,7 +10,7 @@ import sys
 from typing import Literal
 
 
-DeviceType = Literal["cpu", "cuda", "mps"]
+DeviceType = Literal["cpu", "cuda", "mps", "dml"]
 
 
 @dataclass(frozen=True)
@@ -124,6 +124,7 @@ def detect_runtime_profile(
     torch_module = None
     torch_cuda_available = False
     torch_mps_available = False
+    torch_directml_available = False
     gpu_name: str | None = None
     gpu_memory_gb: float | None = None
     system_gpu_name, system_gpu_memory_gb = _probe_nvidia_smi()
@@ -132,7 +133,7 @@ def detect_runtime_profile(
     # CPU-only scripts (PrepareDashboardData, Evaluation, TemporalAnalysis) pass
     # device="cpu" explicitly — importing torch there wastes several seconds and
     # can hang on machines with broken CUDA driver DLLs.
-    _needs_gpu_probe = device.lower().strip() in {"auto", "cuda", "mps"}
+    _needs_gpu_probe = device.lower().strip() in {"auto", "cuda", "mps", "dml"}
 
     try:
         if _needs_gpu_probe:
@@ -152,6 +153,14 @@ def detect_runtime_profile(
                 )
             elif torch_mps_available:
                 gpu_name = "Apple Silicon GPU"
+            else:
+                try:
+                    import torch_directml  # type: ignore[import-not-found]
+
+                    _ = torch_directml.device()
+                    torch_directml_available = True
+                except Exception:
+                    torch_directml_available = False
     except Exception:
         torch_module = None
 
@@ -159,7 +168,7 @@ def detect_runtime_profile(
     chosen_device: DeviceType = "cpu"
     device_reason = "CPU execution selected."
 
-    if requested_device not in {"auto", "cpu", "cuda", "mps"}:
+    if requested_device not in {"auto", "cpu", "cuda", "mps", "dml"}:
         requested_device = "auto"
 
     if requested_device == "cuda":
@@ -185,6 +194,14 @@ def detect_runtime_profile(
     elif requested_device == "cpu":
         chosen_device = "cpu"
         device_reason = "CPU execution selected by override."
+    elif requested_device == "dml":
+        if torch_directml_available:
+            chosen_device = "dml"
+            gpu_name = system_gpu_name or "DirectML-compatible GPU"
+            device_reason = "Using DirectML for SentenceTransformer inference."
+        else:
+            chosen_device = "cpu"
+            device_reason = "DirectML requested but not available; falling back to CPU."
     else:
         if torch_cuda_available:
             chosen_device = "cuda"
@@ -192,6 +209,10 @@ def detect_runtime_profile(
         elif torch_mps_available:
             chosen_device = "mps"
             device_reason = "Auto-detected MPS for SentenceTransformer inference."
+        elif torch_directml_available:
+            chosen_device = "dml"
+            gpu_name = system_gpu_name or "DirectML-compatible GPU"
+            device_reason = "Auto-detected DirectML for SentenceTransformer inference."
         else:
             chosen_device = "cpu"
             if system_gpu_name:
