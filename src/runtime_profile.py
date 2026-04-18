@@ -10,7 +10,7 @@ import sys
 from typing import Literal
 
 
-DeviceType = Literal["cpu", "cuda", "mps"]
+DeviceType = Literal["cpu", "cuda", "mps", "dml"]
 
 
 @dataclass(frozen=True)
@@ -124,27 +124,43 @@ def detect_runtime_profile(
     torch_module = None
     torch_cuda_available = False
     torch_mps_available = False
+    torch_directml_available = False
     gpu_name: str | None = None
     gpu_memory_gb: float | None = None
     system_gpu_name, system_gpu_memory_gb = _probe_nvidia_smi()
 
-    try:
-        import torch  # type: ignore[import-not-found]
+    # Only import torch when the caller may actually need GPU acceleration.
+    # CPU-only scripts (PrepareDashboardData, Evaluation, TemporalAnalysis) pass
+    # device="cpu" explicitly — importing torch there wastes several seconds and
+    # can hang on machines with broken CUDA driver DLLs.
+    _needs_gpu_probe = device.lower().strip() in {"auto", "cuda", "mps", "dml"}
 
-        torch_module = torch
-        torch_cuda_available = bool(torch.cuda.is_available())
-        torch_mps_available = bool(
-            getattr(torch.backends, "mps", None) is not None
-            and torch.backends.mps.is_available()
-        )
-        if torch_cuda_available:
-            gpu_name = torch.cuda.get_device_name(0)
-            gpu_memory_gb = round(
-                torch.cuda.get_device_properties(0).total_memory / (1024 ** 3),
-                2,
+    try:
+        if _needs_gpu_probe:
+            import torch  # type: ignore[import-not-found]
+
+            torch_module = torch
+            torch_cuda_available = bool(torch.cuda.is_available())
+            torch_mps_available = bool(
+                getattr(torch.backends, "mps", None) is not None
+                and torch.backends.mps.is_available()
             )
-        elif torch_mps_available:
-            gpu_name = "Apple Silicon GPU"
+            if torch_cuda_available:
+                gpu_name = torch.cuda.get_device_name(0)
+                gpu_memory_gb = round(
+                    torch.cuda.get_device_properties(0).total_memory / (1024 ** 3),
+                    2,
+                )
+            elif torch_mps_available:
+                gpu_name = "Apple Silicon GPU"
+            else:
+                try:
+                    import torch_directml  # type: ignore[import-not-found]
+
+                    _ = torch_directml.device()
+                    torch_directml_available = True
+                except Exception:
+                    torch_directml_available = False
     except Exception:
         torch_module = None
 
@@ -152,7 +168,7 @@ def detect_runtime_profile(
     chosen_device: DeviceType = "cpu"
     device_reason = "CPU execution selected."
 
-    if requested_device not in {"auto", "cpu", "cuda", "mps"}:
+    if requested_device not in {"auto", "cpu", "cuda", "mps", "dml"}:
         requested_device = "auto"
 
     if requested_device == "cuda":
@@ -178,6 +194,14 @@ def detect_runtime_profile(
     elif requested_device == "cpu":
         chosen_device = "cpu"
         device_reason = "CPU execution selected by override."
+    elif requested_device == "dml":
+        if torch_directml_available:
+            chosen_device = "dml"
+            gpu_name = system_gpu_name or "DirectML-compatible GPU"
+            device_reason = "Using DirectML for SentenceTransformer inference."
+        else:
+            chosen_device = "cpu"
+            device_reason = "DirectML requested but not available; falling back to CPU."
     else:
         if torch_cuda_available:
             chosen_device = "cuda"
@@ -185,6 +209,10 @@ def detect_runtime_profile(
         elif torch_mps_available:
             chosen_device = "mps"
             device_reason = "Auto-detected MPS for SentenceTransformer inference."
+        elif torch_directml_available:
+            chosen_device = "dml"
+            gpu_name = system_gpu_name or "DirectML-compatible GPU"
+            device_reason = "Auto-detected DirectML for SentenceTransformer inference."
         else:
             chosen_device = "cpu"
             if system_gpu_name:
@@ -233,7 +261,7 @@ def detect_runtime_profile(
 def apply_runtime_profile(profile: RuntimeProfile) -> None:
     """Apply threading-related settings for CPU-bound libraries."""
 
-    os.environ["TOKENIZERS_PARALLELISM"] = "true"
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
     os.environ["OMP_NUM_THREADS"] = str(profile.cpu_threads)
     os.environ["MKL_NUM_THREADS"] = str(profile.cpu_threads)
     os.environ["OPENBLAS_NUM_THREADS"] = str(profile.cpu_threads)

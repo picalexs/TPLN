@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import argparse
 import os
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 import sys
 from pathlib import Path
 from typing import cast
@@ -48,7 +48,7 @@ from src.runtime_profile import (
     detect_runtime_profile,
     format_runtime_profile,
 )
-from src.text_processing import clean_text, remove_stopwords_and_clean
+from src.text_processing import clean_text, load_stopwords, remove_stopwords_and_clean
 
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 
@@ -78,24 +78,28 @@ def _clean_stopword_chunk(values: list[str]) -> list[str]:
     return [remove_stopwords_and_clean(value) for value in values]
 
 
-def build_document_nostop(series: pd.Series, cpu_threads: int, chunk_size: int) -> pd.Series:
-    """Build the stopword-free document column with conservative parallelism."""
+def build_document_nostop(series: pd.Series, cpu_threads: int) -> pd.Series:
+    """Build the stopword-free document column using thread-based parallelism."""
     values = series.fillna("").astype(str).tolist()
     if not values:
         return pd.Series(dtype="object", index=series.index)
 
-    if cpu_threads <= 1 or len(values) < max(chunk_size, 50_000):
+    if cpu_threads <= 1 or len(values) < 50_000:
         cleaned = [remove_stopwords_and_clean(value) for value in values]
         return pd.Series(cleaned, index=series.index, dtype="object")
 
-    worker_chunk_size = max(5_000, min(chunk_size, len(values) // max(cpu_threads * 4, 1)))
+    # Pre-warm stopword cache in the main thread so threads don't race the file read.
+    load_stopwords()
+
+    # One chunk per thread: threads share address space so no per-process data copy.
+    worker_chunk_size = max(5_000, (len(values) + cpu_threads - 1) // cpu_threads)
     worker_chunks = [
         values[start:start + worker_chunk_size]
         for start in range(0, len(values), worker_chunk_size)
     ]
 
     cleaned_values: list[str] = []
-    with ProcessPoolExecutor(max_workers=cpu_threads) as executor:
+    with ThreadPoolExecutor(max_workers=cpu_threads) as executor:
         for cleaned_chunk in executor.map(_clean_stopword_chunk, worker_chunks):
             cleaned_values.extend(cleaned_chunk)
 
@@ -288,7 +292,7 @@ def print_domain_report(train_df: pd.DataFrame) -> None:
     )
 
 
-def build_documents(train_df: pd.DataFrame, cpu_threads: int, chunk_size: int) -> pd.DataFrame:
+def build_documents(train_df: pd.DataFrame, cpu_threads: int) -> pd.DataFrame:
     """Create the text columns used downstream by embeddings and TF-IDF."""
     train_df = train_df.copy()
     train_df["document"] = (train_df["title"] + ". " + train_df["text"]).map(clean_text)
@@ -300,7 +304,6 @@ def build_documents(train_df: pd.DataFrame, cpu_threads: int, chunk_size: int) -
     train_df["document_nostop"] = build_document_nostop(
         train_df["document"],
         cpu_threads=cpu_threads,
-        chunk_size=chunk_size,
     )
     return train_df
 
@@ -370,7 +373,6 @@ def main() -> int:
     train_df = build_documents(
         train_df,
         cpu_threads=profile.cpu_threads,
-        chunk_size=profile.chunk_size,
     )
     train_df = filter_rows(train_df)
     print_stats(train_df)

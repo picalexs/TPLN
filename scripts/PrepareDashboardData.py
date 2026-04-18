@@ -158,7 +158,7 @@ def _aggregate_count_frames(count_frames: list[pd.DataFrame], count_column: str)
 
     combined = pd.concat(count_frames, ignore_index=True)
     grouped = combined.groupby("topic_group", as_index=False)[count_column].sum()
-    grouped = grouped.loc[grouped["topic_group"].sort_values().index].reset_index(drop=True)
+    grouped = grouped.sort_values("topic_group").reset_index(drop=True)
     return grouped
 
 
@@ -172,10 +172,11 @@ def _build_mode_frame(
 
     combined = pd.concat(count_frames, ignore_index=True)
     combined = combined.groupby(["topic_group", "cluster", value_column], as_index=False)["count"].sum()
-    combined = combined.loc[combined[value_column].sort_values(kind="stable").index]
-    combined = combined.loc[combined["count"].sort_values(ascending=False, kind="stable").index]
-    combined = combined.loc[combined["cluster"].sort_values(kind="stable").index]
-    combined = combined.loc[combined["topic_group"].sort_values(kind="stable").index]
+    combined = combined.sort_values(
+        ["topic_group", "cluster", "count", value_column],
+        ascending=[True, True, False, True],
+        kind="stable",
+    ).reset_index(drop=True)
     combined = combined.drop_duplicates(["topic_group", "cluster"], keep="first").reset_index(drop=True)
     combined[output_column] = combined[value_column]
     return combined[["topic_group", "cluster", output_column]].reset_index(drop=True)

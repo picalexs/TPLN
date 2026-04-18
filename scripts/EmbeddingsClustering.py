@@ -118,7 +118,34 @@ def encode_documents(
     model: SentenceTransformer,
     documents: list[str],
     batch_size: int,
+    device_name: str,
 ) -> np.ndarray:
+    if device_name == "dml":
+        import torch
+
+        # SentenceTransformer.encode is wrapped in inference_mode(). On DirectML,
+        # this can fail inside transformer layers with a version_counter error.
+        encode_impl = getattr(type(model).encode, "__wrapped__", None)
+        if callable(encode_impl):
+            with torch.no_grad():
+                return cast(np.ndarray, encode_impl(
+                    model,
+                    documents,
+                    batch_size=batch_size,
+                    show_progress_bar=True,
+                    convert_to_numpy=True,
+                    normalize_embeddings=True,
+                )).astype(np.float32)
+
+        with torch.no_grad():
+            return model.encode(
+                documents,
+                batch_size=batch_size,
+                show_progress_bar=True,
+                convert_to_numpy=True,
+                normalize_embeddings=True,
+            ).astype(np.float32)
+
     return model.encode(
         documents,
         batch_size=batch_size,
@@ -133,6 +160,7 @@ def load_or_create_embeddings(
     documents: list[str],
     topic_name: str,
     batch_size: int,
+    device_name: str,
 ) -> np.ndarray:
     emb_path = EMB_DIR / f"{safe_topic_name(topic_name)}_embeddings.npy"
 
@@ -146,10 +174,23 @@ def load_or_create_embeddings(
     else:
         print("Generating embeddings...")
 
-    embeddings = encode_documents(model, documents, batch_size=batch_size)
+    embeddings = encode_documents(
+        model,
+        documents,
+        batch_size=batch_size,
+        device_name=device_name,
+    )
     np.save(emb_path, embeddings)
     print(f"Embeddings shape: {embeddings.shape}")
     return embeddings
+
+
+def resolve_sentence_transformer_device(device_name: str):
+    if device_name == "dml":
+        import torch_directml
+
+        return torch_directml.device()
+    return device_name
 
 
 def build_faiss_index(embeddings: np.ndarray) -> faiss.Index:
@@ -313,7 +354,10 @@ def evaluate_topic_configs(
             "min_samples": cfg["min_samples"],
             "metric": "euclidean",
             "prediction_data": True,
-            "core_dist_n_jobs": core_dist_n_jobs,
+            # On Windows, joblib multiprocessing uses Win32 IPC pipes that overflow
+            # (WinError 1450) when pickling large KD-tree payloads.  Force single-
+            # threaded core-distance computation; the tree build itself is fast enough.
+            "core_dist_n_jobs": 1 if sys.platform == "win32" else core_dist_n_jobs,
         }
         if "cluster_selection_epsilon" in cfg:
             clusterer_kwargs["cluster_selection_epsilon"] = cfg["cluster_selection_epsilon"]
@@ -435,6 +479,8 @@ def process_topic(
     batch_size: int,
     core_dist_n_jobs: int,
     global_cluster_offset: int,
+    device_name: str,
+    debug_neighbors: bool = False,
 ) -> tuple[pd.DataFrame, list[dict[str, Any]], int]:
     print("\n" + "=" * 60)
     print(f"TOPIC_GROUP: {topic_name}")
@@ -449,9 +495,11 @@ def process_topic(
         documents=documents,
         topic_name=topic_name,
         batch_size=batch_size,
+        device_name=device_name,
     )
-    index = build_faiss_index(embeddings)
-    print_neighbor_examples(index, embeddings, df_topic)
+    if debug_neighbors:
+        index = build_faiss_index(embeddings)
+        print_neighbor_examples(index, embeddings, df_topic)
 
     print("\nReducing dimensions with UMAP 15-D for clustering and scatter...")
     embeddings_reduced = fit_umap_for_clustering(embeddings, cpu_threads=core_dist_n_jobs)
@@ -555,10 +603,16 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Generate SBERT embeddings and run HDBSCAN clustering on the cleaned parquet dataset."
     )
-    parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda", "mps"])
+    parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda", "mps", "dml"])
     parser.add_argument("--cpu-threads", type=int, default=None)
     parser.add_argument("--embed-batch-size", type=int, default=None)
     parser.add_argument("--nrows", type=int, default=None, help="Optional row limit for quick tests")
+    parser.add_argument(
+        "--debug-neighbors",
+        action="store_true",
+        default=False,
+        help="Build FAISS index and print nearest-neighbor examples (high RAM; off by default)",
+    )
     return parser.parse_args()
 
 
@@ -582,7 +636,8 @@ def main() -> int:
 
     print(f"\nText column for embeddings: {TEXT_COLUMN}")
     print(f"Loading SentenceTransformer model: {SBERT_MODEL} on {profile.device}...")
-    model = SentenceTransformer(SBERT_MODEL, device=profile.device)
+    model_device = resolve_sentence_transformer_device(profile.device)
+    model = SentenceTransformer(SBERT_MODEL, device=model_device)
 
     all_results: list[dict[str, Any]] = []
     final_chunks: list[pd.DataFrame] = []
@@ -596,6 +651,8 @@ def main() -> int:
             batch_size=profile.embedding_batch_size,
             core_dist_n_jobs=profile.cpu_threads,
             global_cluster_offset=global_cluster_offset,
+            device_name=profile.device,
+            debug_neighbors=args.debug_neighbors,
         )
         final_chunks.append(labelled_topic)
         all_results.extend(topic_results)
