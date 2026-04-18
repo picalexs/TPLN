@@ -1,11 +1,13 @@
 """Text processing utilities for Romanian language data."""
 
 import re
+import threading
 import unicodedata
 import pandas as pd
 from .paths import STOPWORDS_PATH
 
 _STOPWORDS_CACHE = None
+_STOPWORDS_LOCK = threading.Lock()
 
 
 def strip_emojis(text: str) -> str:
@@ -23,16 +25,16 @@ def strip_diacritics(text: str) -> str:
 
 
 def load_stopwords():
-    """Load Romanian stopwords from file. Cached after first load."""
+    """Load Romanian stopwords from file. Cached after first load. Thread-safe."""
     global _STOPWORDS_CACHE
     if _STOPWORDS_CACHE is not None:
         return _STOPWORDS_CACHE
-
-    with open(STOPWORDS_PATH, "r", encoding="utf-8") as f:
-        stopwords = {line.strip().lower() for line in f if line.strip()}
-
-    stopwords_nodiac = {strip_diacritics(w) for w in stopwords}
-    _STOPWORDS_CACHE = stopwords | stopwords_nodiac
+    with _STOPWORDS_LOCK:
+        if _STOPWORDS_CACHE is None:  # double-checked locking
+            with open(STOPWORDS_PATH, "r", encoding="utf-8") as f:
+                stopwords = {line.strip().lower() for line in f if line.strip()}
+            stopwords_nodiac = {strip_diacritics(w) for w in stopwords}
+            _STOPWORDS_CACHE = stopwords | stopwords_nodiac
     return _STOPWORDS_CACHE
 
 
