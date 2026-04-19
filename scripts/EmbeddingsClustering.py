@@ -14,6 +14,8 @@ Outputs:
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 import re
 import sys
@@ -44,7 +46,14 @@ from src.config import (
     UMAP_N_NEIGHBORS,
 )
 from src.io_utils import load_clean_data
-from src.paths import CLEAN_PARQUET, CLUSTERED_PARQUET, EMB_DIR, HDBSCAN_CONFIG_RESULTS
+from src.paths import (
+    CLEAN_PARQUET,
+    CLUSTERED_PARQUET,
+    EMB_DIR,
+    FAISS_DIR,
+    FAISS_KNN_DIR,
+    HDBSCAN_CONFIG_RESULTS,
+)
 from src.runtime_profile import (
     apply_runtime_profile,
     detect_runtime_profile,
@@ -58,6 +67,7 @@ if callable(stdout_reconfigure):
 
 SILHOUETTE_SAMPLE_SIZE = 5000
 MIN_UMAP_RECURSION_LIMIT = 20_000
+FAISS_METADATA_VERSION = 1
 
 
 def build_topic_metadata(topics: pd.Series) -> pd.DataFrame:
@@ -195,13 +205,174 @@ def resolve_sentence_transformer_device(device_name: str):
     return device_name
 
 
-def build_faiss_index(embeddings: np.ndarray) -> faiss.Index:
-    print("Building in-memory FAISS index...")
+def _compute_documents_fingerprint(documents: list[str]) -> str:
+    """Create a stable fingerprint so FAISS indexes can be reused safely."""
+    hasher = hashlib.sha256()
+    for doc in documents:
+        hasher.update(str(doc).encode("utf-8", errors="ignore"))
+        hasher.update(b"\0")
+    return hasher.hexdigest()
+
+
+def _faiss_paths(topic_name: str) -> tuple[Path, Path, Path]:
+    safe_name = safe_topic_name(topic_name)
+    index_path = FAISS_DIR / f"{safe_name}.faiss"
+    metadata_path = FAISS_DIR / f"{safe_name}.json"
+    knn_path = FAISS_KNN_DIR / f"{safe_name}_knn.parquet"
+    return index_path, metadata_path, knn_path
+
+
+def _build_faiss_index(
+    embeddings: np.ndarray,
+    *,
+    index_type: str,
+    ivf_nlist: int,
+    ivf_nprobe: int,
+) -> tuple[faiss.Index, dict[str, Any]]:
     embeddings = np.asarray(embeddings, dtype=np.float32)
-    index = faiss.IndexFlatIP(embeddings.shape[1])
+    dim = int(embeddings.shape[1])
+    n_vec = int(embeddings.shape[0])
+
+    if index_type == "ivfflat":
+        if n_vec < 200:
+            print("  FAISS ivfflat requested, but topic is too small; falling back to flat index.")
+        else:
+            nlist = min(max(1, ivf_nlist), max(1, n_vec // 40))
+            quantizer = faiss.IndexFlatIP(dim)
+            index = faiss.IndexIVFFlat(quantizer, dim, nlist, faiss.METRIC_INNER_PRODUCT)
+            cast(Any, index).train(embeddings)
+            cast(Any, index).add(embeddings)
+            cast(Any, index).nprobe = min(max(1, ivf_nprobe), nlist)
+            return index, {
+                "index_type": "ivfflat",
+                "ivf_nlist": int(nlist),
+                "ivf_nprobe": int(cast(Any, index).nprobe),
+            }
+
+    index = faiss.IndexFlatIP(dim)
     cast(Any, index).add(embeddings)
-    print(f"Vectors indexed: {index.ntotal}")
-    return index
+    return index, {
+        "index_type": "flat",
+        "ivf_nlist": None,
+        "ivf_nprobe": None,
+    }
+
+
+def _load_faiss_metadata(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        return None
+    return None
+
+
+def _save_faiss_metadata(path: Path, metadata: dict[str, Any]) -> None:
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(metadata, f, ensure_ascii=True, indent=2)
+
+
+def get_or_create_faiss_index(
+    topic_name: str,
+    embeddings: np.ndarray,
+    documents: list[str],
+    *,
+    index_type: str,
+    ivf_nlist: int,
+    ivf_nprobe: int,
+    rebuild: bool,
+) -> tuple[faiss.Index, dict[str, Any], bool]:
+    """Load a compatible persisted FAISS index or build and save a new one."""
+    index_path, metadata_path, _ = _faiss_paths(topic_name)
+    doc_fingerprint = _compute_documents_fingerprint(documents)
+    expected_count = int(len(documents))
+    expected_dim = int(embeddings.shape[1])
+
+    if not rebuild and index_path.exists() and metadata_path.exists():
+        metadata = _load_faiss_metadata(metadata_path)
+        if metadata is not None:
+            is_compatible = (
+                int(metadata.get("schema_version", -1)) == FAISS_METADATA_VERSION
+                and str(metadata.get("topic_group", "")) == str(topic_name)
+                and int(metadata.get("vector_count", -1)) == expected_count
+                and int(metadata.get("vector_dim", -1)) == expected_dim
+                and str(metadata.get("document_fingerprint", "")) == doc_fingerprint
+            )
+            if is_compatible:
+                try:
+                    index = faiss.read_index(str(index_path))
+                    if int(index.ntotal) == expected_count and int(index.d) == expected_dim:
+                        if metadata.get("index_type") == "ivfflat":
+                            desired_nprobe = int(metadata.get("ivf_nprobe") or ivf_nprobe)
+                            try:
+                                cast(Any, index).nprobe = max(1, desired_nprobe)
+                            except Exception:
+                                pass
+                        print(f"Reusing persisted FAISS index: {index_path}")
+                        return index, metadata, False
+                except Exception:
+                    pass
+
+    print("Building persisted FAISS index...")
+    index, faiss_info = _build_faiss_index(
+        embeddings,
+        index_type=index_type,
+        ivf_nlist=ivf_nlist,
+        ivf_nprobe=ivf_nprobe,
+    )
+    faiss.write_index(index, str(index_path))
+
+    metadata = {
+        "schema_version": FAISS_METADATA_VERSION,
+        "topic_group": topic_name,
+        "vector_count": expected_count,
+        "vector_dim": expected_dim,
+        "document_fingerprint": doc_fingerprint,
+        **faiss_info,
+    }
+    _save_faiss_metadata(metadata_path, metadata)
+    print(f"Persisted FAISS index: {index_path}")
+    return index, metadata, True
+
+
+def maybe_export_knn(
+    topic_name: str,
+    index: faiss.Index,
+    embeddings: np.ndarray,
+    *,
+    k: int,
+) -> None:
+    if k < 1:
+        return
+    _, _, knn_path = _faiss_paths(topic_name)
+    q = np.asarray(embeddings, dtype=np.float32)
+    distances, indices = cast(Any, index).search(q, k + 1)
+
+    records: list[dict[str, Any]] = []
+    for source_idx in range(len(q)):
+        rank = 0
+        for neighbor_idx, score in zip(indices[source_idx], distances[source_idx]):
+            if int(neighbor_idx) == int(source_idx) or int(neighbor_idx) < 0:
+                continue
+            rank += 1
+            if rank > k:
+                break
+            records.append(
+                {
+                    "topic_group": topic_name,
+                    "source_idx": int(source_idx),
+                    "neighbor_idx": int(neighbor_idx),
+                    "rank": int(rank),
+                    "score": float(score),
+                }
+            )
+
+    pd.DataFrame(records).to_parquet(knn_path, index=False)
+    print(f"Persisted FAISS kNN edges: {knn_path} ({len(records):,} rows)")
 
 
 def print_neighbor_examples(index: faiss.Index, embeddings: np.ndarray, df_topic: pd.DataFrame) -> None:
@@ -482,6 +653,13 @@ def process_topic(
     core_dist_n_jobs: int,
     global_cluster_offset: int,
     device_name: str,
+    faiss_enabled: bool,
+    faiss_index_type: str,
+    faiss_ivf_nlist: int,
+    faiss_ivf_nprobe: int,
+    faiss_rebuild: bool,
+    faiss_write_knn: bool,
+    faiss_knn_k: int,
     debug_neighbors: bool = False,
 ) -> tuple[pd.DataFrame, list[dict[str, Any]], int]:
     print("\n" + "=" * 60)
@@ -499,9 +677,35 @@ def process_topic(
         batch_size=batch_size,
         device_name=device_name,
     )
-    if debug_neighbors:
-        index = build_faiss_index(embeddings)
-        print_neighbor_examples(index, embeddings, df_topic)
+
+    if faiss_enabled:
+        faiss_index, faiss_meta, created = get_or_create_faiss_index(
+            topic_name=topic_name,
+            embeddings=embeddings,
+            documents=documents,
+            index_type=faiss_index_type,
+            ivf_nlist=faiss_ivf_nlist,
+            ivf_nprobe=faiss_ivf_nprobe,
+            rebuild=faiss_rebuild,
+        )
+        print(
+            "FAISS ready: "
+            f"type={faiss_meta.get('index_type')} vectors={int(faiss_index.ntotal)} "
+            f"created_now={'yes' if created else 'no'}"
+        )
+        if faiss_write_knn:
+            maybe_export_knn(
+                topic_name=topic_name,
+                index=faiss_index,
+                embeddings=embeddings,
+                k=faiss_knn_k,
+            )
+        if debug_neighbors:
+            print_neighbor_examples(faiss_index, embeddings, df_topic)
+    elif debug_neighbors:
+        tmp_index = faiss.IndexFlatIP(embeddings.shape[1])
+        cast(Any, tmp_index).add(np.asarray(embeddings, dtype=np.float32))
+        print_neighbor_examples(tmp_index, embeddings, df_topic)
 
     print("\nReducing dimensions with UMAP 15-D for clustering and scatter...")
     embeddings_reduced = fit_umap_for_clustering(embeddings, cpu_threads=core_dist_n_jobs)
@@ -610,6 +814,48 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--embed-batch-size", type=int, default=None)
     parser.add_argument("--nrows", type=int, default=None, help="Optional row limit for quick tests")
     parser.add_argument(
+        "--disable-faiss",
+        action="store_true",
+        default=False,
+        help="Skip FAISS index build/reuse for this run.",
+    )
+    parser.add_argument(
+        "--faiss-index-type",
+        choices=["flat", "ivfflat"],
+        default="ivfflat",
+        help="FAISS index family to build and persist per topic.",
+    )
+    parser.add_argument(
+        "--faiss-ivf-nlist",
+        type=int,
+        default=1024,
+        help="Target IVF list count for ivfflat indexes.",
+    )
+    parser.add_argument(
+        "--faiss-ivf-nprobe",
+        type=int,
+        default=32,
+        help="Probe count for ivfflat indexes at query time.",
+    )
+    parser.add_argument(
+        "--faiss-rebuild",
+        action="store_true",
+        default=False,
+        help="Force rebuilding persisted FAISS indexes even when metadata matches.",
+    )
+    parser.add_argument(
+        "--faiss-write-knn",
+        action="store_true",
+        default=False,
+        help="Persist top-k nearest-neighbor edges per topic in parquet format.",
+    )
+    parser.add_argument(
+        "--faiss-knn-k",
+        type=int,
+        default=10,
+        help="Neighbor count per row when --faiss-write-knn is enabled.",
+    )
+    parser.add_argument(
         "--debug-neighbors",
         action="store_true",
         default=False,
@@ -633,6 +879,9 @@ def main() -> int:
             pass
     print(format_runtime_profile(profile))
 
+    FAISS_DIR.mkdir(parents=True, exist_ok=True)
+    FAISS_KNN_DIR.mkdir(parents=True, exist_ok=True)
+
     df = load_input_data(nrows=args.nrows)
     eligible_topics = get_eligible_topics(df)
 
@@ -654,6 +903,13 @@ def main() -> int:
             core_dist_n_jobs=profile.cpu_threads,
             global_cluster_offset=global_cluster_offset,
             device_name=profile.device,
+            faiss_enabled=not args.disable_faiss,
+            faiss_index_type=args.faiss_index_type,
+            faiss_ivf_nlist=max(1, args.faiss_ivf_nlist),
+            faiss_ivf_nprobe=max(1, args.faiss_ivf_nprobe),
+            faiss_rebuild=args.faiss_rebuild,
+            faiss_write_knn=args.faiss_write_knn,
+            faiss_knn_k=max(1, args.faiss_knn_k),
             debug_neighbors=args.debug_neighbors,
         )
         final_chunks.append(labelled_topic)

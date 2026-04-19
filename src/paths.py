@@ -10,6 +10,8 @@ def setup_data_dirs():
     """Create all required data subdirectories."""
     subdirs = [
         "embeddings",
+        "faiss",
+        "faiss/knn",
         "clusters",
         "temporal",
         "gdelt",
@@ -34,6 +36,8 @@ CLEAN_PARQUET = DATA_DIR / "rolargesum_train_clean.parquet"
 # EMBEDDINGS & CLUSTERING
 # =========================================================================
 EMB_DIR = DATA_DIR / "embeddings"
+FAISS_DIR = DATA_DIR / "faiss"
+FAISS_KNN_DIR = FAISS_DIR / "knn"
 CLUSTER_DIR = DATA_DIR / "clusters"
 
 # =========================================================================
