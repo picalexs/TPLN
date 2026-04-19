@@ -20,16 +20,20 @@ if str(REPO_ROOT) not in sys.path:
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 from src.paths import (
     DASHBOARD_ABLATION_PARQUET,
     DASHBOARD_CLUSTER_ARTICLES_PARQUET,
     DASHBOARD_CLUSTER_DAILY_PARQUET,
+    DASHBOARD_CLUSTER_SIMILARITY_PARQUET,
     DASHBOARD_CLUSTER_OVERVIEW_PARQUET,
     DASHBOARD_CONFIG_PARQUET,
     DASHBOARD_EVAL_PARQUET,
     DASHBOARD_META_PARQUET,
+    DASHBOARD_NEIGHBORS_PARQUET,
+    DASHBOARD_RUNTIME_PARQUET,
     DASHBOARD_SCATTER_SAMPLE_PARQUET,
     DASHBOARD_TEMPORAL_PARQUET,
     DASHBOARD_TOPIC_SUMMARY_PARQUET,
@@ -63,6 +67,9 @@ OPTIONAL_ASSETS = [
     DASHBOARD_CONFIG_PARQUET,
     DASHBOARD_EVAL_PARQUET,
     DASHBOARD_ABLATION_PARQUET,
+    DASHBOARD_NEIGHBORS_PARQUET,
+    DASHBOARD_CLUSTER_SIMILARITY_PARQUET,
+    DASHBOARD_RUNTIME_PARQUET,
 ]
 
 CLUSTER_SUMMARY_COLUMNS = [
@@ -98,6 +105,8 @@ PAGE_OPTIONS = [
     "Cluster Explorer",
     "Timeline and Bursts",
     "Top Campaigns",
+    "Similarity Map",
+    "Topic Health",
     "Evaluation and Ablation",
 ]
 
@@ -301,6 +310,31 @@ def load_eval() -> pd.DataFrame | None:
 
 
 @st.cache_data(show_spinner=False)
+def load_neighbors() -> pd.DataFrame | None:
+    if not DASHBOARD_NEIGHBORS_PARQUET.exists():
+        return None
+    df = pd.read_parquet(DASHBOARD_NEIGHBORS_PARQUET)
+    for col in ("source_timestamp", "neighbor_timestamp"):
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors="coerce")
+    return df
+
+
+@st.cache_data(show_spinner=False)
+def load_cluster_similarity() -> pd.DataFrame | None:
+    if not DASHBOARD_CLUSTER_SIMILARITY_PARQUET.exists():
+        return None
+    return pd.read_parquet(DASHBOARD_CLUSTER_SIMILARITY_PARQUET)
+
+
+@st.cache_data(show_spinner=False)
+def load_runtime_profile() -> pd.DataFrame | None:
+    if not DASHBOARD_RUNTIME_PARQUET.exists():
+        return None
+    return pd.read_parquet(DASHBOARD_RUNTIME_PARQUET)
+
+
+@st.cache_data(show_spinner=False)
 def load_articles_for_cluster(cluster_id: int) -> pd.DataFrame:
     if not DASHBOARD_CLUSTER_ARTICLES_PARQUET.exists():
         return pd.DataFrame()
@@ -318,6 +352,10 @@ def load_articles_for_cluster(cluster_id: int) -> pd.DataFrame:
         df["timestamp_date"] = df["timestamp"].dt.strftime("%Y-%m-%d").fillna("")
     if "topics" not in df.columns:
         df["topics"] = ""
+    if "topic_row_idx" in df.columns:
+        df["topic_row_idx"] = pd.to_numeric(df["topic_row_idx"], errors="coerce")
+    else:
+        df["topic_row_idx"] = pd.Series([pd.NA] * len(df))
     return df
 
 
@@ -348,9 +386,6 @@ cluster_overview_df = ensure_dataframe(load_cluster_overview() if not missing_as
 cluster_daily_df = ensure_dataframe(load_cluster_daily() if not missing_assets else None)
 scatter_sample_df = ensure_dataframe(load_scatter_sample() if not missing_assets else None)
 temporal_df = ensure_dataframe(load_temporal() if not missing_assets else None)
-config_df = ensure_dataframe(load_config() if not missing_assets else None)
-ablation_df = ensure_dataframe(load_ablation() if not missing_assets else None)
-eval_df = ensure_dataframe(load_eval() if not missing_assets else None)
 
 
 # ---------------------------------------------------------------------------
@@ -389,8 +424,11 @@ if not temporal_df.empty:
     burst_col = "burst_score" if "burst_score" in temporal_df.columns else "burst_score_daily"
     max_burst = int(temporal_df[burst_col].max()) if len(temporal_df) > 0 else 1
     min_burst = st.sidebar.slider("Min burst score", 0, max(max_burst, 1), 0)
+    max_susp = float(temporal_df["suspicion_score"].max()) if "suspicion_score" in temporal_df.columns and len(temporal_df) > 0 else 0.0
+    min_suspicion = st.sidebar.slider("Min suspicion score", 0.0, max(max_susp, 0.0), 0.0, 0.5)
 else:
     min_burst = 0
+    min_suspicion = 0.0
 
 if dashboard_meta and pd.notna(dashboard_meta.get("min_timestamp")) and pd.notna(dashboard_meta.get("max_timestamp")):
     date_min = pd.Timestamp(dashboard_meta["min_timestamp"]).date()
@@ -441,6 +479,11 @@ filtered_temporal_df = filter_temporal_df(
     min_burst=min_burst,
 )
 
+if not filtered_temporal_df.empty and "suspicion_score" in filtered_temporal_df.columns:
+    filtered_temporal_df = filtered_temporal_df[
+        filtered_temporal_df["suspicion_score"] >= float(min_suspicion)
+    ].copy()
+
 scatter_display_df = filter_sample_for_display(
     scatter_df=scatter_sample_df,
     cluster_overview_df=cluster_overview_df,
@@ -487,7 +530,7 @@ if page == "Cluster Explorer":
             yaxis_title="UMAP-2",
             legend_title="Topic",
         )
-        st.plotly_chart(fig_scatter, use_container_width=True)
+        st.plotly_chart(fig_scatter, width="stretch")
 
         fig_scatter_cluster = px.scatter(
             scatter_display_df,
@@ -504,7 +547,7 @@ if page == "Cluster Explorer":
             yaxis_title="UMAP-2",
             showlegend=False,
         )
-        st.plotly_chart(fig_scatter_cluster, use_container_width=True)
+        st.plotly_chart(fig_scatter_cluster, width="stretch")
     else:
         st.info("No UMAP sample rows match the selected filters.")
 
@@ -517,7 +560,7 @@ if page == "Cluster Explorer":
 
         st.dataframe(
             filtered_temporal_df[available_cols].head(50),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
     else:
@@ -548,9 +591,54 @@ if page == "Cluster Explorer":
                 cluster_articles[["title", "topics", "timestamp_date", "url"]]
                 .rename(columns={"timestamp_date": "date"})
                 .head(30),
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
+
+            st.markdown("### Semantic Neighbor Evidence")
+            neighbors_df = ensure_dataframe(load_neighbors())
+            if not neighbors_df.empty and "topic_row_idx" in cluster_articles.columns:
+                neighbor_candidates = cluster_articles.dropna(subset=["topic_row_idx"]).copy()
+                if not neighbor_candidates.empty:
+                    neighbor_candidates["topic_row_idx"] = pd.to_numeric(
+                        neighbor_candidates["topic_row_idx"],
+                        errors="coerce",
+                    )
+                    neighbor_candidates = neighbor_candidates.dropna(subset=["topic_row_idx"]).copy()
+                if not neighbor_candidates.empty:
+                    neighbor_candidates = neighbor_candidates.reset_index(drop=True)
+                    article_idx = st.selectbox(
+                        "Choose article for neighbor lookup",
+                        range(len(neighbor_candidates)),
+                        format_func=lambda i: str(neighbor_candidates.iloc[i]["title"])[:110],
+                    )
+                    src = neighbor_candidates.iloc[article_idx]
+                    src_topic = str(src.get("topic_group", ""))
+                    src_row_idx = int(src.get("topic_row_idx"))
+                    src_neighbors = neighbors_df[
+                        (neighbors_df["topic_group"] == src_topic)
+                        & (pd.to_numeric(neighbors_df["source_idx"], errors="coerce") == src_row_idx)
+                    ].copy()
+                    if not src_neighbors.empty:
+                        src_neighbors = src_neighbors.sort_values("rank").head(20)
+                        st.dataframe(
+                            src_neighbors[
+                                [
+                                    "rank",
+                                    "score",
+                                    "neighbor_cluster",
+                                    "neighbor_title",
+                                    "neighbor_domain",
+                                    "neighbor_url",
+                                ]
+                            ],
+                            width="stretch",
+                            hide_index=True,
+                        )
+                    else:
+                        st.info("No FAISS neighbors found for this article. Re-run clustering if needed.")
+            else:
+                st.info("Neighbor asset not available. Re-run embeddings with FAISS kNN export enabled.")
         else:
             st.info("No articles remain in this cluster after the current date filter.")
     else:
@@ -632,7 +720,7 @@ elif page == "Timeline and Bursts":
                 yaxis_title="Articles per day",
                 height=400,
             )
-            st.plotly_chart(fig_timeline, use_container_width=True)
+            st.plotly_chart(fig_timeline, width="stretch")
 
             weekly = (
                 cluster_daily.set_index("date")["article_count"]
@@ -652,7 +740,7 @@ elif page == "Timeline and Bursts":
                 yaxis_title="Articles per week",
                 height=350,
             )
-            st.plotly_chart(fig_weekly, use_container_width=True)
+            st.plotly_chart(fig_weekly, width="stretch")
         else:
             st.warning(f"No timestamped articles in cluster {sel_cluster_id}.")
 
@@ -663,7 +751,7 @@ elif page == "Timeline and Bursts":
             title="Distribution of daily burst scores across filtered clusters",
             nbins=max(int(filtered_temporal_df[burst_col].max()) + 1, 5),
         )
-        st.plotly_chart(fig_burst_dist, use_container_width=True)
+        st.plotly_chart(fig_burst_dist, width="stretch")
 
         st.subheader("Burst Score vs Cluster Size")
         if "suspicion_score" in filtered_temporal_df.columns:
@@ -681,7 +769,7 @@ elif page == "Timeline and Bursts":
                 title="Cluster size vs Burst score (bubble size = suspicion)",
                 height=500,
             )
-            st.plotly_chart(fig_burst_size, use_container_width=True)
+            st.plotly_chart(fig_burst_size, width="stretch")
     else:
         st.info("No temporal clusters match the selected filters.")
 
@@ -725,17 +813,227 @@ elif page == "Top Campaigns":
                 st.markdown(f"**Period:** {first} to {last}")
                 st.markdown(f"**Representative:** {rep}")
 
+                explain_cols = [
+                    "burst_score_daily",
+                    "burst_score_weekly",
+                    "burst_stable",
+                    "timestamp_coverage_ratio",
+                    "peak_to_baseline_ratio",
+                    "top_domain_share",
+                    "timestamp_source_reliability",
+                    "support_weight",
+                    "coverage_weight",
+                    "source_weight",
+                    "domain_weight",
+                    "suspicion_penalty_total",
+                ]
+                explain_payload = {c: camp.get(c) for c in explain_cols if c in camp.index}
+                if explain_payload:
+                    st.json(explain_payload, expanded=False)
+
                 arts = load_articles_for_cluster(cid)
                 if not arts.empty:
                     st.dataframe(
                         arts[["title", "topics", "timestamp_date", "url"]]
                         .rename(columns={"timestamp_date": "date"})
                         .head(10),
-                        use_container_width=True,
+                        width="stretch",
                         hide_index=True,
                     )
+
+                storyline = load_daily_for_cluster(cid)
+                if not storyline.empty:
+                    story_fig = px.area(
+                        storyline.sort_values("date"),
+                        x="date",
+                        y="article_count",
+                        title=f"Campaign storyline for cluster {cid}",
+                    )
+                    story_fig.update_layout(height=260)
+                    st.plotly_chart(story_fig, width="stretch")
     else:
         st.info("No campaigns match the current filters.")
+
+
+# ===========================================================================
+# PAGE: SIMILARITY MAP
+# ===========================================================================
+elif page == "Similarity Map":
+    st.header("Cross-Cluster Similarity Map")
+    st.caption("Cluster proximity graph based on representative UMAP coordinates.")
+    cluster_similarity_df = ensure_dataframe(load_cluster_similarity())
+
+    if cluster_similarity_df.empty:
+        st.info("No cluster similarity asset found. Re-run PrepareDashboardData.")
+    else:
+        graph_df = cluster_similarity_df.copy()
+        graph_df = graph_df[graph_df["topic_group"].isin(selected_topics)].copy()
+        if graph_df.empty:
+            st.info("No cluster-similarity edges match selected topic filters.")
+        else:
+            # Keep a fixed cap for responsiveness and deterministic rendering.
+            graph_df = graph_df.sort_values("similarity", ascending=False).head(2000)
+            st.dataframe(
+                graph_df[["topic_group", "cluster", "neighbor_cluster", "similarity", "distance", "rank"]],
+                width="stretch",
+                hide_index=True,
+            )
+
+            # Use full anchor sample (not date-filtered display sample) so edge drawing
+            # remains stable even when sidebar date/size filters are restrictive.
+            scatter_anchor_df = scatter_sample_df.copy()
+            if not scatter_anchor_df.empty and "sample_type" in scatter_anchor_df.columns:
+                scatter_anchor_df = scatter_anchor_df[
+                    scatter_anchor_df["sample_type"] == "cluster_anchor"
+                ].copy()
+            if not scatter_anchor_df.empty:
+                scatter_anchor_df = scatter_anchor_df[
+                    scatter_anchor_df["topic_group"].isin(selected_topics)
+                ].copy()
+
+            cluster_positions = (
+                scatter_anchor_df.dropna(subset=["umap_x", "umap_y"])
+                .groupby(["topic_group", "cluster"], as_index=False)[["umap_x", "umap_y"]]
+                .mean()
+            )
+            if not cluster_positions.empty:
+                pos_lookup = {
+                    (str(row.topic_group), int(row.cluster)): (float(row.umap_x), float(row.umap_y))
+                    for row in cluster_positions.itertuples(index=False)
+                }
+
+                edge_x: list[float | None] = []
+                edge_y: list[float | None] = []
+                drawn_edges = 0
+                for row in graph_df.itertuples(index=False):
+                    key_a = (str(row.topic_group), int(row.cluster))
+                    key_b = (str(row.topic_group), int(row.neighbor_cluster))
+                    if key_a not in pos_lookup or key_b not in pos_lookup:
+                        continue
+                    ax, ay = pos_lookup[key_a]
+                    bx, by = pos_lookup[key_b]
+                    edge_x.extend([ax, bx, None])
+                    edge_y.extend([ay, by, None])
+                    drawn_edges += 1
+
+                fig_graph = go.Figure()
+                if edge_x:
+                    fig_graph.add_trace(
+                        go.Scatter(
+                            x=edge_x,
+                            y=edge_y,
+                            mode="lines",
+                            line=dict(width=1.2, color="rgba(40,40,40,0.55)"),
+                            hoverinfo="skip",
+                            name="similarity edges",
+                        )
+                    )
+
+                for topic_name in sorted(cluster_positions["topic_group"].astype(str).unique().tolist()):
+                    topic_points = cluster_positions[cluster_positions["topic_group"] == topic_name]
+                    fig_graph.add_trace(
+                        go.Scatter(
+                            x=topic_points["umap_x"],
+                            y=topic_points["umap_y"],
+                            mode="markers",
+                            marker=dict(size=7),
+                            name=topic_name,
+                            text=[f"cluster={int(c)}" for c in topic_points["cluster"]],
+                            hovertemplate="%{text}<extra>" + topic_name + "</extra>",
+                        )
+                    )
+
+                fig_graph.update_layout(
+                    title=f"Cluster similarity graph",
+                    xaxis_title="UMAP-1",
+                    yaxis_title="UMAP-2",
+                    height=700,
+                )
+                st.plotly_chart(fig_graph, width="stretch")
+                if drawn_edges == 0:
+                    st.warning(
+                        "No edges could be projected onto current cluster anchors. "
+                        "Re-run PrepareDashboardData.py if this persists."
+                    )
+
+
+# ===========================================================================
+# PAGE: TOPIC HEALTH
+# ===========================================================================
+elif page == "Topic Health":
+    st.header("Topic Health Board")
+    config_df = ensure_dataframe(load_config())
+    runtime_df = ensure_dataframe(load_runtime_profile())
+
+    if topic_summary_df.empty:
+        st.info("Topic summary is unavailable.")
+    else:
+        health_df = topic_summary_df.copy()
+        if not config_df.empty:
+            best_cfg = (
+                config_df.sort_values("selection_score", ascending=False)
+                .groupby("topic_group")
+                .first()
+                .reset_index()[
+                    [
+                        "topic_group",
+                        "silhouette",
+                        "noise_percent",
+                        "davies_bouldin",
+                        "calinski_harabasz",
+                        "graph_cohesion",
+                        "graph_cohesion_real",
+                    ]
+                ]
+            )
+            health_df = health_df.merge(best_cfg, on="topic_group", how="left")
+
+        health_cols = [
+            "topic_group",
+            "total_rows",
+            "real_cluster_count",
+            "noise_rate",
+            "timestamp_coverage_ratio",
+            "mean_real_cluster_size",
+            "silhouette",
+            "noise_percent",
+            "davies_bouldin",
+            "calinski_harabasz",
+            "graph_cohesion",
+            "graph_cohesion_real",
+        ]
+        health_cols = [col for col in health_cols if col in health_df.columns]
+        st.dataframe(health_df[health_cols], width="stretch", hide_index=True)
+
+        if not runtime_df.empty:
+            st.subheader("Runtime Observability")
+            timed = runtime_df[runtime_df["topic_group"] != "__GLOBAL__"].copy()
+            if not timed.empty:
+                fig_runtime = px.bar(
+                    timed.sort_values("topic_total_seconds", ascending=False),
+                    x="topic_group",
+                    y="topic_total_seconds",
+                    color="topic_group",
+                    title="Per-topic total runtime",
+                )
+                st.plotly_chart(fig_runtime, width="stretch")
+
+                runtime_cols = [
+                    "topic_group",
+                    "topic_size",
+                    "embedding_seconds",
+                    "faiss_seconds",
+                    "umap_seconds",
+                    "hdbscan_sweep_seconds",
+                    "topic_total_seconds",
+                    "rows_per_second",
+                ]
+                runtime_cols = [col for col in runtime_cols if col in timed.columns]
+                st.dataframe(
+                    timed[runtime_cols].sort_values("topic_total_seconds", ascending=False),
+                    width="stretch",
+                    hide_index=True,
+                )
 
 
 # ===========================================================================
@@ -743,10 +1041,13 @@ elif page == "Top Campaigns":
 # ===========================================================================
 else:
     st.header("Evaluation & Ablation Studies")
+    config_df = ensure_dataframe(load_config())
+    ablation_df = ensure_dataframe(load_ablation())
+    eval_df = ensure_dataframe(load_eval())
 
     if not config_df.empty:
         st.subheader("HDBSCAN Config Sweep Results")
-        st.dataframe(config_df, use_container_width=True, hide_index=True)
+        st.dataframe(config_df, width="stretch", hide_index=True)
 
         best = (
             config_df.sort_values("selection_score", ascending=False)
@@ -764,7 +1065,7 @@ else:
             text="silhouette",
         )
         fig_sil.update_traces(texttemplate="%{text:.3f}", textposition="auto")
-        st.plotly_chart(fig_sil, use_container_width=True)
+        st.plotly_chart(fig_sil, width="stretch")
 
         fig_noise = px.bar(
             best,
@@ -775,13 +1076,46 @@ else:
             text="noise_percent",
         )
         fig_noise.update_traces(texttemplate="%{text:.1f}%", textposition="auto")
-        st.plotly_chart(fig_noise, use_container_width=True)
+        st.plotly_chart(fig_noise, width="stretch")
 
     if not ablation_df.empty:
         st.subheader("Ablation: TF-IDF/KMeans vs SBERT/KMeans vs SBERT/HDBSCAN")
-        st.dataframe(ablation_df, use_container_width=True, hide_index=True)
+        ab_cols = st.columns(3)
+        ab_topics = ["All"] + sorted(ablation_df["topic_group"].dropna().astype(str).unique().tolist())
+        ab_methods = ["All"] + sorted(ablation_df["method"].dropna().astype(str).unique().tolist())
+        ab_topic = ab_cols[0].selectbox("Ablation topic", ab_topics, index=0)
+        ab_method = ab_cols[1].selectbox("Ablation method", ab_methods, index=0)
+        ab_max_rows = int(ab_cols[2].slider("Rows", min_value=20, max_value=2000, value=300, step=20))
 
-        sil_df = ablation_df[ablation_df["silhouette"].notna()].copy()
+        ablation_view = ablation_df.copy()
+        if ab_topic != "All":
+            ablation_view = ablation_view[ablation_view["topic_group"] == ab_topic]
+        if ab_method != "All":
+            ablation_view = ablation_view[ablation_view["method"] == ab_method]
+
+        st.dataframe(ablation_view.head(ab_max_rows), width="stretch", hide_index=True)
+
+        winner_col = "topic_winner_method"
+        if winner_col in ablation_view.columns:
+            st.markdown("#### Topic-level winners")
+            winner_df = (
+                ablation_view[["topic_group", winner_col]]
+                .dropna()
+                .drop_duplicates()
+            )
+            if not winner_df.empty:
+                winner_counts = winner_df[winner_col].value_counts().reset_index()
+                winner_counts.columns = ["method", "wins"]
+                fig_winners = px.bar(
+                    winner_counts,
+                    x="method",
+                    y="wins",
+                    color="method",
+                    title="How many topics each method wins",
+                )
+                st.plotly_chart(fig_winners, width="stretch")
+
+        sil_df = ablation_view[ablation_view["silhouette"].notna()].copy()
         if not sil_df.empty:
             fig_ablation = px.bar(
                 sil_df,
@@ -793,9 +1127,9 @@ else:
                 text="silhouette",
             )
             fig_ablation.update_traces(texttemplate="%{text:.3f}", textposition="auto")
-            st.plotly_chart(fig_ablation, use_container_width=True)
+            st.plotly_chart(fig_ablation, width="stretch")
 
-        db_df = ablation_df[ablation_df["davies_bouldin"].notna()].copy()
+        db_df = ablation_view[ablation_view["davies_bouldin"].notna()].copy()
         if not db_df.empty:
             fig_db = px.bar(
                 db_df,
@@ -807,7 +1141,62 @@ else:
                 text="davies_bouldin",
             )
             fig_db.update_traces(texttemplate="%{text:.3f}", textposition="auto")
-            st.plotly_chart(fig_db, use_container_width=True)
+            st.plotly_chart(fig_db, width="stretch")
+
+        qi_df = ablation_view[ablation_view.get("quality_index").notna()].copy() if "quality_index" in ablation_view.columns else pd.DataFrame()
+        if not qi_df.empty:
+            fig_qi = px.bar(
+                qi_df,
+                x="topic_group",
+                y="quality_index",
+                color="method",
+                barmode="group",
+                title="Composite quality index by method and topic",
+                text="quality_index",
+            )
+            fig_qi.update_traces(texttemplate="%{text:.3f}", textposition="auto")
+            st.plotly_chart(fig_qi, width="stretch")
+
+        if "runtime_seconds" in ablation_view.columns:
+            rt_df = ablation_view[ablation_view["runtime_seconds"].notna()].copy()
+            if not rt_df.empty:
+                fig_rt = px.bar(
+                    rt_df,
+                    x="topic_group",
+                    y="runtime_seconds",
+                    color="method",
+                    barmode="group",
+                    title="Ablation runtime by method and topic",
+                )
+                st.plotly_chart(fig_rt, width="stretch")
+
+        burst_view = pd.DataFrame()
+        if "ablation_family" in ablation_view.columns:
+            burst_view = ablation_view[ablation_view["ablation_family"] == "burst_scoring"].copy()
+        if not burst_view.empty:
+            st.markdown("#### Burst Scoring On vs Off")
+
+            if "mean_cluster_suspicion" in burst_view.columns:
+                fig_burst_mean = px.bar(
+                    burst_view,
+                    x="topic_group",
+                    y="mean_cluster_suspicion",
+                    color="method",
+                    barmode="group",
+                    title="Mean cluster suspicion with vs without burst scoring",
+                )
+                st.plotly_chart(fig_burst_mean, width="stretch")
+
+            if "topk_mean_suspicion" in burst_view.columns:
+                fig_burst_topk = px.bar(
+                    burst_view,
+                    x="topic_group",
+                    y="topk_mean_suspicion",
+                    color="method",
+                    barmode="group",
+                    title="Top-k mean suspicion with vs without burst scoring",
+                )
+                st.plotly_chart(fig_burst_topk, width="stretch")
     else:
         st.info(
             "Ablation report not found. Run scripts/TFIDFBaseline.py and then "
@@ -816,7 +1205,7 @@ else:
 
     if not eval_df.empty:
         st.subheader("Detailed Evaluation Report")
-        st.dataframe(eval_df, use_container_width=True, hide_index=True)
+        st.dataframe(eval_df, width="stretch", hide_index=True)
 
 
 # ---------------------------------------------------------------------------
