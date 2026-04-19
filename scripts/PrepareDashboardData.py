@@ -23,16 +23,21 @@ from src.paths import (
     DASHBOARD_ABLATION_PARQUET,
     DASHBOARD_ARTICLE_DETAIL,
     DASHBOARD_CLUSTER_DAILY_PARQUET,
+    DASHBOARD_CLUSTER_SIMILARITY_PARQUET,
     DASHBOARD_CLUSTER_OVERVIEW_PARQUET,
     DASHBOARD_CONFIG_PARQUET,
     DASHBOARD_DIR,
     DASHBOARD_EVAL_PARQUET,
     DASHBOARD_META_PARQUET,
+    DASHBOARD_NEIGHBORS_PARQUET,
+    DASHBOARD_RUNTIME_PARQUET,
     DASHBOARD_SCATTER_SAMPLE_PARQUET,
     DASHBOARD_TEMPORAL_PARQUET,
     DASHBOARD_TOPIC_SUMMARY_PARQUET,
     EVALUATION_REPORT,
+    FAISS_KNN_DIR,
     HDBSCAN_CONFIG_RESULTS,
+    RUNTIME_OBSERVABILITY_PARQUET,
     TEMPORAL_STATS,
     TFIDF_ABLATION_REPORT,
 )
@@ -59,6 +64,7 @@ DETAIL_OUTPUT_COLUMNS = [
     "cluster_assignment_reason",
     "cluster_membership_strength",
     "cluster_outlier_score",
+    "topic_row_idx",
     "umap_x",
     "umap_y",
 ]
@@ -76,6 +82,7 @@ SCATTER_OUTPUT_COLUMNS = [
     "umap_y",
     "cluster_membership_strength",
     "cluster_outlier_score",
+    "topic_row_idx",
 ]
 
 READ_COLUMNS = [
@@ -95,6 +102,7 @@ READ_COLUMNS = [
     "cluster_assignment_reason",
     "cluster_membership_strength",
     "cluster_outlier_score",
+    "topic_row_idx",
     "umap_x",
     "umap_y",
 ]
@@ -250,6 +258,77 @@ def _combine_candidate_rows(candidate_frames: list[pd.DataFrame], best: bool) ->
     return combined
 
 
+def _load_faiss_neighbors() -> pd.DataFrame:
+    """Load and combine per-topic FAISS neighbor exports, if available."""
+    if not FAISS_KNN_DIR.exists():
+        return pd.DataFrame(columns=["topic_group", "source_idx", "neighbor_idx", "rank", "score"])
+
+    files = sorted(FAISS_KNN_DIR.glob("*_knn.parquet"))
+    if not files:
+        return pd.DataFrame(columns=["topic_group", "source_idx", "neighbor_idx", "rank", "score"])
+
+    frames: list[pd.DataFrame] = []
+    for path in files:
+        try:
+            frame = pd.read_parquet(path)
+            for required in ("topic_group", "source_idx", "neighbor_idx", "rank", "score"):
+                if required not in frame.columns:
+                    frame[required] = np.nan
+            frames.append(frame[["topic_group", "source_idx", "neighbor_idx", "rank", "score"]])
+        except Exception:
+            continue
+
+    if not frames:
+        return pd.DataFrame(columns=["topic_group", "source_idx", "neighbor_idx", "rank", "score"])
+    return pd.concat(frames, ignore_index=True)
+
+
+def _build_cluster_similarity(best_rows_df: pd.DataFrame, per_cluster_k: int = 6) -> pd.DataFrame:
+    """Build a lightweight cluster-proximity graph from representative UMAP coordinates."""
+    if best_rows_df.empty:
+        return pd.DataFrame(columns=[
+            "topic_group",
+            "cluster",
+            "neighbor_cluster",
+            "distance",
+            "similarity",
+            "rank",
+        ])
+
+    rows: list[dict[str, Any]] = []
+    for topic_group, group in best_rows_df.groupby("topic_group"):
+        coords = group[["umap_x", "umap_y"]].to_numpy(dtype=np.float32)
+        if len(coords) < 2:
+            continue
+        clusters = group["cluster"].to_numpy(dtype=np.int64)
+
+        diff = coords[:, None, :] - coords[None, :, :]
+        dist = np.sqrt(np.sum(diff * diff, axis=2))
+
+        for i in range(len(coords)):
+            ranked_idx = np.argsort(dist[i])
+            rank = 0
+            for j in ranked_idx:
+                if i == j:
+                    continue
+                rank += 1
+                if rank > per_cluster_k:
+                    break
+                d = float(dist[i, j])
+                rows.append(
+                    {
+                        "topic_group": str(topic_group),
+                        "cluster": int(clusters[i]),
+                        "neighbor_cluster": int(clusters[j]),
+                        "distance": d,
+                        "similarity": float(1.0 / (1.0 + d)),
+                        "rank": int(rank),
+                    }
+                )
+
+    return pd.DataFrame(rows)
+
+
 def build_dashboard_assets(
     input_path: Path,
     output_dir: Path,
@@ -262,10 +341,12 @@ def build_dashboard_assets(
     output_dir.mkdir(parents=True, exist_ok=True)
     article_detail_path = _asset_path(output_dir, DASHBOARD_ARTICLE_DETAIL)
     cluster_overview_path = _asset_path(output_dir, DASHBOARD_CLUSTER_OVERVIEW_PARQUET)
+    cluster_similarity_path = _asset_path(output_dir, DASHBOARD_CLUSTER_SIMILARITY_PARQUET)
     topic_summary_path = _asset_path(output_dir, DASHBOARD_TOPIC_SUMMARY_PARQUET)
     global_meta_path = _asset_path(output_dir, DASHBOARD_META_PARQUET)
     cluster_daily_path = _asset_path(output_dir, DASHBOARD_CLUSTER_DAILY_PARQUET)
     scatter_sample_path = _asset_path(output_dir, DASHBOARD_SCATTER_SAMPLE_PARQUET)
+    neighbors_path = _asset_path(output_dir, DASHBOARD_NEIGHBORS_PARQUET)
 
     rng = np.random.default_rng(42)
     total_rows = 0
@@ -284,6 +365,7 @@ def build_dashboard_assets(
     assignment_reason_count_frames: list[pd.DataFrame] = []
     best_candidate_frames: list[pd.DataFrame] = []
     edge_candidate_frames: list[pd.DataFrame] = []
+    article_lookup_frames: list[pd.DataFrame] = []
     noise_samples: dict[str, pd.DataFrame] = {}
 
     detail_writer: pq.ParquetWriter | None = None
@@ -349,6 +431,10 @@ def build_dashboard_assets(
                 chunk["cluster_size"] = pd.to_numeric(chunk["cluster_size"], errors="coerce")
             else:
                 chunk["cluster_size"] = np.nan
+            if "topic_row_idx" in chunk.columns:
+                chunk["topic_row_idx"] = pd.to_numeric(chunk["topic_row_idx"], errors="coerce")
+            else:
+                chunk["topic_row_idx"] = np.nan
 
             total_rows += len(chunk)
             timestamped_rows += int(chunk["timestamp"].notna().sum())
@@ -397,6 +483,20 @@ def build_dashboard_assets(
                         min_timestamp=("timestamp", "min"),
                         max_timestamp=("timestamp", "max"),
                     )
+                )
+
+                article_lookup_frames.append(
+                    real_chunk[
+                        [
+                            "topic_group",
+                            "topic_row_idx",
+                            "cluster",
+                            "title",
+                            "url",
+                            "timestamp",
+                            "source_domain",
+                        ]
+                    ].copy()
                 )
 
                 dated_real = real_chunk[real_chunk["timestamp_date"].notna()]
@@ -547,6 +647,7 @@ def build_dashboard_assets(
     )
     best_rows_df = _combine_candidate_rows(best_candidate_frames, best=True)
     edge_rows_df = _combine_candidate_rows(edge_candidate_frames, best=False)
+    cluster_similarity_df = _build_cluster_similarity(best_rows_df, per_cluster_k=6)
 
     if not cluster_overview_df.empty:
         cluster_overview_df = cluster_overview_df.merge(
@@ -649,6 +750,7 @@ def build_dashboard_assets(
         )
 
     _write_parquet_atomic(cluster_overview_df, cluster_overview_path)
+    _write_parquet_atomic(cluster_similarity_df, cluster_similarity_path)
     _write_parquet_atomic(cluster_daily_df, cluster_daily_path)
 
     topic_total_df = _aggregate_count_frames(topic_total_frames, "total_rows")
@@ -756,6 +858,85 @@ def build_dashboard_assets(
         scatter_df = pd.DataFrame(columns=SCATTER_OUTPUT_COLUMNS)
     _write_parquet_atomic(scatter_df, scatter_sample_path)
 
+    neighbors_raw_df = _load_faiss_neighbors()
+    if not neighbors_raw_df.empty and article_lookup_frames:
+        article_lookup_df = pd.concat(article_lookup_frames, ignore_index=True)
+        article_lookup_df = article_lookup_df.dropna(subset=["topic_row_idx"]).copy()
+        article_lookup_df["topic_row_idx"] = article_lookup_df["topic_row_idx"].astype(int)
+
+        source_lookup = article_lookup_df.rename(
+            columns={
+                "topic_row_idx": "source_idx",
+                "cluster": "source_cluster",
+                "title": "source_title",
+                "url": "source_url",
+                "timestamp": "source_timestamp",
+                "source_domain": "source_domain",
+            }
+        )
+        neighbor_lookup = article_lookup_df.rename(
+            columns={
+                "topic_row_idx": "neighbor_idx",
+                "cluster": "neighbor_cluster",
+                "title": "neighbor_title",
+                "url": "neighbor_url",
+                "timestamp": "neighbor_timestamp",
+                "source_domain": "neighbor_domain",
+            }
+        )
+
+        neighbors_df = neighbors_raw_df.merge(
+            source_lookup[
+                [
+                    "topic_group",
+                    "source_idx",
+                    "source_cluster",
+                    "source_title",
+                    "source_url",
+                    "source_timestamp",
+                    "source_domain",
+                ]
+            ],
+            on=["topic_group", "source_idx"],
+            how="left",
+        )
+        neighbors_df = neighbors_df.merge(
+            neighbor_lookup[
+                [
+                    "topic_group",
+                    "neighbor_idx",
+                    "neighbor_cluster",
+                    "neighbor_title",
+                    "neighbor_url",
+                    "neighbor_timestamp",
+                    "neighbor_domain",
+                ]
+            ],
+            on=["topic_group", "neighbor_idx"],
+            how="left",
+        )
+    else:
+        neighbors_df = pd.DataFrame(
+            columns=[
+                "topic_group",
+                "source_idx",
+                "neighbor_idx",
+                "rank",
+                "score",
+                "source_cluster",
+                "neighbor_cluster",
+                "source_title",
+                "neighbor_title",
+                "source_url",
+                "neighbor_url",
+                "source_timestamp",
+                "neighbor_timestamp",
+                "source_domain",
+                "neighbor_domain",
+            ]
+        )
+    _write_parquet_atomic(neighbors_df, neighbors_path)
+
     min_timestamp = (
         cluster_overview_df["first_seen"].dropna().min()
         if not cluster_overview_df.empty and "first_seen" in cluster_overview_df.columns
@@ -798,6 +979,7 @@ def build_dashboard_assets(
     _copy_parquet_atomic(HDBSCAN_CONFIG_RESULTS, output_dir / DASHBOARD_CONFIG_PARQUET.name)
     _copy_parquet_atomic(EVALUATION_REPORT, output_dir / DASHBOARD_EVAL_PARQUET.name)
     _copy_parquet_atomic(TFIDF_ABLATION_REPORT, output_dir / DASHBOARD_ABLATION_PARQUET.name)
+    _copy_parquet_atomic(RUNTIME_OBSERVABILITY_PARQUET, output_dir / DASHBOARD_RUNTIME_PARQUET.name)
 
     return {
         "output_dir": output_dir,
@@ -811,6 +993,8 @@ def build_dashboard_assets(
         "topic_summary_rows": len(topic_summary_df),
         "daily_count_rows": len(cluster_daily_df),
         "scatter_sample_rows": len(scatter_df),
+        "neighbor_rows": len(neighbors_df),
+        "cluster_similarity_rows": len(cluster_similarity_df),
     }
 
 
