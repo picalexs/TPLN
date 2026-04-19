@@ -52,6 +52,7 @@ DASHBOARD_DIR = DATA_DIR / "dashboard"
 # =========================================================================
 CLUSTERED_PARQUET = CLUSTER_DIR / "clustered_data.parquet"
 HDBSCAN_CONFIG_RESULTS = CLUSTER_DIR / "hdbscan_config_results.parquet"
+RUNTIME_OBSERVABILITY_PARQUET = CLUSTER_DIR / "runtime_observability.parquet"
 TEMPORAL_STATS = TEMPORAL_DIR / "cluster_temporal_stats.parquet"
 EVALUATION_REPORT = DATA_DIR / "evaluation_report.parquet"
 TFIDF_ABLATION_REPORT = DATA_DIR / "tfidf_ablation_report.parquet"
@@ -69,6 +70,9 @@ DASHBOARD_TEMPORAL_PARQUET = DASHBOARD_DIR / "temporal_stats.parquet"
 DASHBOARD_CONFIG_PARQUET = DASHBOARD_DIR / "config_results.parquet"
 DASHBOARD_EVAL_PARQUET = DASHBOARD_DIR / "evaluation_report.parquet"
 DASHBOARD_ABLATION_PARQUET = DASHBOARD_DIR / "tfidf_ablation.parquet"
+DASHBOARD_NEIGHBORS_PARQUET = DASHBOARD_DIR / "neighbors.parquet"
+DASHBOARD_CLUSTER_SIMILARITY_PARQUET = DASHBOARD_DIR / "cluster_similarity.parquet"
+DASHBOARD_RUNTIME_PARQUET = DASHBOARD_DIR / "runtime_observability.parquet"
 
 # Backward-friendly aliases for newer dashboard builder code.
 DASHBOARD_GLOBAL_META = DASHBOARD_META_PARQUET
