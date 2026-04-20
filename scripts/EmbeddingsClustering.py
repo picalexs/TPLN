@@ -43,8 +43,11 @@ from src.config import (
     HDBSCAN_TOPIC_CONFIGS,
     MIN_TOPIC_SIZE,
     SBERT_MODEL,
+    SHORT_DOCUMENT_MAX_CHARS,
     TEXT_COLUMN,
     UMAP_N_NEIGHBORS,
+    build_hdbscan_configs,
+    compute_umap_n_neighbors,
 )
 from src.io_utils import load_clean_data
 from src.paths import (
@@ -170,6 +173,46 @@ def encode_documents(
     ).astype(np.float32)
 
 
+def _documents_fingerprint(documents: list[str]) -> str:
+    """Compact hash over document count plus sampled content.
+
+    We cannot hash every row (too slow on 100k+ topics), but we want to
+    detect the common "text column was regenerated" case (e.g. the
+    SHORT_DOCUMENT_MAX_CHARS slice length changed). A handful of sampled
+    documents combined with the total count is sufficient in practice.
+    """
+    if not documents:
+        return hashlib.sha1(b"empty").hexdigest()
+    sample_indices = [0, len(documents) // 2, len(documents) - 1]
+    hasher = hashlib.sha1()
+    hasher.update(str(len(documents)).encode("utf-8"))
+    for idx in sample_indices:
+        hasher.update(b"|")
+        hasher.update(documents[idx].encode("utf-8", errors="replace"))
+    return hasher.hexdigest()
+
+
+def _embedding_fingerprint(documents: list[str]) -> dict[str, Any]:
+    return {
+        "model": SBERT_MODEL,
+        "text_column": TEXT_COLUMN,
+        "short_doc_chars": SHORT_DOCUMENT_MAX_CHARS,
+        "count": len(documents),
+        "documents_hash": _documents_fingerprint(documents),
+    }
+
+
+def _cache_is_fresh(meta_path: Path, expected: dict[str, Any]) -> bool:
+    if not meta_path.exists():
+        return False
+    try:
+        with meta_path.open("r", encoding="utf-8") as meta_file:
+            cached = json.load(meta_file)
+    except (OSError, json.JSONDecodeError):
+        return False
+    return all(cached.get(key) == value for key, value in expected.items())
+
+
 def load_or_create_embeddings(
     model: SentenceTransformer,
     documents: list[str],
@@ -178,14 +221,21 @@ def load_or_create_embeddings(
     device_name: str,
 ) -> np.ndarray:
     emb_path = EMB_DIR / f"{safe_topic_name(topic_name)}_embeddings.npy"
+    meta_path = emb_path.with_suffix(".meta.json")
+    fingerprint = _embedding_fingerprint(documents)
 
-    if emb_path.exists():
+    if emb_path.exists() and _cache_is_fresh(meta_path, fingerprint):
         print(f"Loading cached embeddings from {emb_path}...")
         embeddings = np.load(emb_path).astype(np.float32)
         if embeddings.shape[0] == len(documents):
             print(f"Embeddings shape: {embeddings.shape}")
             return embeddings
         print(f"  Cache mismatch ({embeddings.shape[0]} vs {len(documents)}), regenerating...")
+    elif emb_path.exists():
+        print(
+            f"  Cached embeddings at {emb_path} are stale (model, slice length, "
+            "or source text changed); regenerating..."
+        )
     else:
         print("Generating embeddings...")
 
@@ -196,6 +246,8 @@ def load_or_create_embeddings(
         device_name=device_name,
     )
     np.save(emb_path, embeddings)
+    with meta_path.open("w", encoding="utf-8") as meta_file:
+        json.dump(fingerprint, meta_file, indent=2, sort_keys=True)
     print(f"Embeddings shape: {embeddings.shape}")
     return embeddings
 
@@ -404,12 +456,19 @@ def ensure_umap_recursion_limit() -> None:
         )
 
 
-def fit_umap_for_clustering(embeddings: np.ndarray, cpu_threads: int) -> np.ndarray:
+def fit_umap_for_clustering(
+    embeddings: np.ndarray,
+    cpu_threads: int,
+    n_neighbors: int | None = None,
+) -> np.ndarray:
     ensure_umap_recursion_limit()
     low_memory = cpu_threads < 16
+    resolved_neighbors = n_neighbors if n_neighbors is not None else UMAP_N_NEIGHBORS
+    # Clamp to the number of points minus one so small topics still fit.
+    resolved_neighbors = max(5, min(resolved_neighbors, embeddings.shape[0] - 1))
 
     base_kwargs = {
-        "n_neighbors": UMAP_N_NEIGHBORS,
+        "n_neighbors": resolved_neighbors,
         "n_components": 15,
         "metric": "cosine",
         "low_memory": low_memory,
@@ -567,17 +626,35 @@ def compute_selection_score(
     sil_score: float | None,
     topic_size: int,
 ) -> float:
-    penalty = largest_real / topic_size
+    """Score an HDBSCAN config, preferring balanced cluster layouts.
+
+    The score rewards low-noise configurations but heavily penalizes
+    two degenerate failure modes:
+
+    * Collapse: a single cluster swallows most of the topic
+      (`largest_real / topic_size > 0.5`).
+    * Under-segmentation: fewer than three real clusters.
+
+    Without these guards the raw `(100 - noise_percent)` term tempts the
+    selector to pick "1 giant cluster + 1% noise" over any meaningful
+    partition.
+    """
+    largest_share = largest_real / topic_size if topic_size else 0.0
     sil_bonus = sil_score * 20 if sil_score is not None else 0
     cluster_bonus = min(num_clusters, 100) / 10
 
     if topic_size < 1000:
-        score = (100 - noise_percent) - (penalty * 120) + (sil_bonus * 1.5) + cluster_bonus
+        score = (100 - noise_percent) - (largest_share * 120) + (sil_bonus * 1.5) + cluster_bonus
     else:
-        score = (100 - noise_percent) - (penalty * 150) + sil_bonus + cluster_bonus
+        score = (100 - noise_percent) - (largest_share * 150) + sil_bonus + cluster_bonus
 
     if num_clusters < 3:
         score -= 100
+
+    # Hard disqualification for collapse: >50% of the topic in one cluster
+    # is never a good clustering, regardless of how low the noise looks.
+    if largest_share > 0.50:
+        score -= 200
 
     return score
 
@@ -590,7 +667,9 @@ def evaluate_topic_configs(
     silhouette_sample_idx: np.ndarray | None,
     core_dist_n_jobs: int,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    configs = HDBSCAN_TOPIC_CONFIGS.get(topic_name, HDBSCAN_DEFAULT_CONFIGS)
+    # Topic-specific overrides win when present; otherwise fall back to a
+    # size-aware sweep so large topics do not get micro min_cluster_size.
+    configs = HDBSCAN_TOPIC_CONFIGS.get(topic_name) or build_hdbscan_configs(topic_size)
     best_result: dict[str, Any] | None = None
     topic_results: list[dict[str, Any]] = []
 
@@ -815,8 +894,16 @@ def process_topic(
         print_neighbor_examples(tmp_index, embeddings, df_topic)
 
     umap_start = perf_counter()
-    print("\nReducing dimensions with UMAP 15-D for clustering and scatter...")
-    embeddings_reduced = fit_umap_for_clustering(embeddings, cpu_threads=core_dist_n_jobs)
+    umap_n_neighbors = compute_umap_n_neighbors(len(df_topic))
+    print(
+        f"\nReducing dimensions with UMAP 15-D for clustering and scatter "
+        f"(n_neighbors={umap_n_neighbors})..."
+    )
+    embeddings_reduced = fit_umap_for_clustering(
+        embeddings,
+        cpu_threads=core_dist_n_jobs,
+        n_neighbors=umap_n_neighbors,
+    )
     print(f"UMAP 15-D shape: {embeddings_reduced.shape}")
     scatter_projection = build_scatter_projection(embeddings_reduced)
     umap_seconds = perf_counter() - umap_start

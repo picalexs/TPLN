@@ -25,6 +25,7 @@ if str(REPO_ROOT) not in sys.path:
 from src.config import (
     COLUMNS_TO_CLEAN,
     COLUMNS_TO_PRESERVE,
+    SHORT_DOCUMENT_MAX_CHARS,
     TIMESTAMP_DOMAIN_MIN_ROWS_FOR_WEAKNESS,
     TIMESTAMP_DOMAIN_REPORT_TOP_N,
     TIMESTAMP_MAX_FUTURE_DAYS_TEXT,
@@ -297,7 +298,9 @@ def build_documents(train_df: pd.DataFrame, cpu_threads: int) -> pd.DataFrame:
     train_df = train_df.copy()
     train_df["document"] = (train_df["title"] + ". " + train_df["text"]).map(clean_text)
     train_df["short_document"] = (
-        train_df["title"] + ". " + train_df["text"].fillna("").astype(str).str.slice(0, 500)
+        train_df["title"]
+        + ". "
+        + train_df["text"].fillna("").astype(str).str.slice(0, SHORT_DOCUMENT_MAX_CHARS)
     ).map(clean_text)
 
     print("\nBuilding stopword-free documents...")

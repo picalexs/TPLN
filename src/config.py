@@ -1,5 +1,9 @@
 """Configuration constants for TPLN pipeline."""
 
+from __future__ import annotations
+
+import math
+
 # =========================================================================
 # MODEL CONFIGURATION
 # =========================================================================
@@ -10,43 +14,97 @@ SBERT_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 # =========================================================================
 TEXT_COLUMN = "short_document"
 MIN_TOPIC_SIZE = 200
+
+# Number of leading characters (title + body excerpt) fed into SBERT.
+# Bumped from 500 to 1500 to give the embedder enough context to
+# discriminate between articles that share a templated lede.
+SHORT_DOCUMENT_MAX_CHARS = 1500
+
+# Fallback only. Use compute_umap_n_neighbors(topic_size) in practice so
+# the UMAP manifold scales with the number of articles in the topic.
 UMAP_N_NEIGHBORS = 30
 
-# HDBSCAN configurations for hyperparameter sweep
-HDBSCAN_DEFAULT_CONFIGS = [
-    {"min_cluster_size": 8,  "min_samples": 3},
-    {"min_cluster_size": 10, "min_samples": 4},
-    {"min_cluster_size": 12, "min_samples": 6},
-    {"min_cluster_size": 15, "min_samples": 8},
-]
 
-# Topic-specific HDBSCAN overrides
-HDBSCAN_TOPIC_CONFIGS = {
-    "politica": [
-        {"min_cluster_size": 12, "min_samples": 4, "cluster_selection_method": "leaf"},
-        {"min_cluster_size": 15, "min_samples": 6, "cluster_selection_method": "leaf"},
-        {"min_cluster_size": 20, "min_samples": 8, "cluster_selection_method": "leaf", "cluster_selection_epsilon": 0.02},
-        {"min_cluster_size": 25, "min_samples": 10, "cluster_selection_method": "eom", "cluster_selection_epsilon": 0.05},
-    ],
-    "social": [
-        {"min_cluster_size": 10, "min_samples": 3},
-        {"min_cluster_size": 15, "min_samples": 6, "cluster_selection_method": "leaf"},
-        {"min_cluster_size": 20, "min_samples": 8, "cluster_selection_method": "leaf", "cluster_selection_epsilon": 0.02},
-        {"min_cluster_size": 25, "min_samples": 10, "cluster_selection_method": "eom", "cluster_selection_epsilon": 0.05},
-    ],
-    "international": [
-        {"min_cluster_size": 10, "min_samples": 3},
-        {"min_cluster_size": 15, "min_samples": 6, "cluster_selection_method": "leaf"},
-        {"min_cluster_size": 20, "min_samples": 8, "cluster_selection_method": "leaf", "cluster_selection_epsilon": 0.02},
-        {"min_cluster_size": 25, "min_samples": 10, "cluster_selection_method": "eom", "cluster_selection_epsilon": 0.05},
-    ],
-    "economie": [
-        {"min_cluster_size": 8, "min_samples": 3},
-        {"min_cluster_size": 12, "min_samples": 4, "cluster_selection_method": "leaf"},
-        {"min_cluster_size": 15, "min_samples": 6, "cluster_selection_method": "leaf", "cluster_selection_epsilon": 0.02},
-        {"min_cluster_size": 20, "min_samples": 8, "cluster_selection_method": "eom", "cluster_selection_epsilon": 0.05},
-    ],
-}
+def compute_umap_n_neighbors(topic_size: int) -> int:
+    """Return a UMAP `n_neighbors` value scaled to the topic size.
+
+    Small neighborhoods preserve only micro-structure, which makes HDBSCAN
+    fragment the space into thousands of tiny clusters on large topics.
+    Scaling with ~sqrt(N) keeps the manifold smooth while staying within
+    UMAP's practical performance envelope.
+    """
+    if topic_size <= 0:
+        return UMAP_N_NEIGHBORS
+    scaled = int(round(math.sqrt(topic_size) * 1.2))
+    return max(30, min(200, scaled))
+
+
+def build_hdbscan_configs(topic_size: int) -> list[dict]:
+    """Return a size-aware HDBSCAN hyperparameter sweep.
+
+    Two axes matter and the previous sweep only varied one of them:
+
+    * `min_cluster_size` sets the smallest cluster the algorithm will
+      keep. Too small on a 100k-article topic and HDBSCAN fragments into
+      thousands of micro-clusters; too large and the condensed tree
+      collapses into a single giant bucket.
+    * `min_samples` controls how conservative the cluster boundary is.
+      High values (~= `min_cluster_size` / 4) treat many borderline
+      articles as noise. Low values (~= `min_cluster_size` / 8-10) let
+      more articles into clusters at the cost of looser coherence.
+    """
+    if topic_size < 500:
+        base = 10
+    elif topic_size < 2_000:
+        base = 15
+    elif topic_size < 8_000:
+        base = 25
+    elif topic_size < 25_000:
+        base = 40
+    elif topic_size < 75_000:
+        base = 60
+    elif topic_size < 150_000:
+        base = 80
+    else:
+        base = 100
+
+    # Loose vs tight min_samples ratios. "loose" pulls borderline
+    # articles into clusters (low noise); "tight" enforces cohesion
+    # (higher noise, cleaner clusters).
+    loose_samples = max(3, base // 8)
+    tight_samples = max(5, base // 4)
+
+    return [
+        # Anchor at the base size with loose samples to minimize noise.
+        {
+            "min_cluster_size": base,
+            "min_samples": loose_samples,
+        },
+        # Same size with tighter samples. If the topic has genuine dense
+        # cores, this is where silhouette peaks.
+        {
+            "min_cluster_size": base,
+            "min_samples": tight_samples,
+        },
+        # Slightly larger clusters with epsilon smoothing so nearby
+        # dense regions merge instead of being split.
+        {
+            "min_cluster_size": int(base * 1.25),
+            "min_samples": max(5, base // 6),
+            "cluster_selection_epsilon": 0.02,
+        },
+        # A conservative safety net for very noisy topics.
+        {
+            "min_cluster_size": int(base * 1.5),
+            "min_samples": tight_samples,
+            "cluster_selection_epsilon": 0.04,
+        },
+    ]
+
+
+# Backwards-compatible fallbacks. Prefer build_hdbscan_configs(topic_size).
+HDBSCAN_DEFAULT_CONFIGS = build_hdbscan_configs(5_000)
+HDBSCAN_TOPIC_CONFIGS: dict[str, list[dict]] = {}
 
 # =========================================================================
 # TF-IDF CONFIGURATION

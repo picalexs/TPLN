@@ -448,27 +448,36 @@ def main() -> int:
         concentration = article_count_ts / max(span_days, 1)
 
         # Confidence weights keep sparse / low-coverage clusters from over-ranking.
+        # Calibrated for the observed corpus where median timestamp coverage is
+        # only ~14% and many clusters span a long calendar range. The previous
+        # calibration (coverage base 0.35, linear slope 0.65) drove the median
+        # suspicion_score to zero because coverage_weight alone started at ~0.44.
         support_weight = min(1.0, article_count_ts / 10.0)
-        coverage_weight = min(1.0, 0.35 + (0.65 * timestamp_coverage_ratio))
-        source_weight = 0.45 + (0.55 * min(1.0, timestamp_source_reliability))
+        coverage_weight = min(1.0, 0.55 + (0.45 * timestamp_coverage_ratio))
+        source_weight = 0.55 + (0.45 * min(1.0, timestamp_source_reliability))
         domain_weight = 0.60 + (0.40 * min(1.0, 1.0 - max(0.0, top_domain_share - 0.5)))
         burst_duration_share_daily = burst_dur_daily / max(span_days, 1)
         burst_duration_share_weekly = min((burst_dur_weekly * 7) / max(span_days, 1), 1.0)
 
         # Explicit penalties for cases that were over-ranking before.
+        # The long-sparse penalty previously blew up at ~46 points for a median
+        # cluster (span ~530 days, active_day_ratio ~0.01, coverage ~0.14),
+        # overwhelming any suspicion signal. We cap the (span_days - 90)/90
+        # ratio and halve the multiplier so the penalty still discourages
+        # sprawling clusters without annihilating the score.
         long_sparse_span_penalty = (
             math.log1p(span_days)
-            * max(0.0, span_days - 90) / 90.0
+            * min(3.0, max(0.0, span_days - 90) / 90.0)
             * (1.0 - active_day_ratio)
             * (1.0 - timestamp_coverage_ratio)
-            * 1.8
+            * 0.6
         )
         single_domain_penalty = (
             max(0.0, top_domain_share - 0.5) * 4.0
             + (1.75 if domain_count == 1 else 0.0)
             + max(0.0, top_timestamp_domain_share - 0.6) * 2.0
         )
-        source_reliability_penalty = (1.0 - timestamp_source_reliability) * 3.0
+        source_reliability_penalty = (1.0 - timestamp_source_reliability) * 1.2
         compactness_penalty = max(0.0, 0.20 - active_day_ratio) * 3.0
         penalty_total = long_sparse_span_penalty + single_domain_penalty + source_reliability_penalty + compactness_penalty
 
