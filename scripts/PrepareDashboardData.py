@@ -36,6 +36,7 @@ from src.paths import (
     TEMPORAL_STATS,
     TFIDF_ABLATION_REPORT,
 )
+from src.io_utils import load_clean_data
 from src.runtime_profile import apply_runtime_profile, detect_runtime_profile, format_runtime_profile
 
 
@@ -152,6 +153,46 @@ def _iter_cluster_input_frames(
         yield batch.to_pandas()
 
 
+def _enrich_legacy_cluster_frame(frame: pd.DataFrame, missing_columns: list[str]) -> pd.DataFrame:
+    if not missing_columns:
+        return frame
+
+    key_columns = ["title", "document", "short_document", "topics"]
+    recoverable_columns = {
+        "summary",
+        "url",
+        "author",
+        "timestamp",
+        "timestamp_source",
+        "timestamp_quality",
+    }
+
+    output = frame.copy()
+    if all(column in output.columns for column in key_columns):
+        wanted = [column for column in missing_columns if column in recoverable_columns]
+        if wanted:
+            clean_columns = key_columns + wanted
+            clean_df = load_clean_data(columns=clean_columns)
+            clean_subset = clean_df[clean_columns].drop_duplicates(subset=key_columns, keep="first")
+            output = output.merge(clean_subset, on=key_columns, how="left", suffixes=("", "_clean"))
+
+            for column in wanted:
+                clean_column = f"{column}_clean"
+                if clean_column not in output.columns:
+                    continue
+                if column in output.columns:
+                    output[column] = output[column].combine_first(output[clean_column])
+                else:
+                    output[column] = output[clean_column]
+                output = output.drop(columns=[clean_column])
+
+    for column in missing_columns:
+        if column not in output.columns:
+            output[column] = np.nan
+
+    return output
+
+
 def _aggregate_count_frames(count_frames: list[pd.DataFrame], count_column: str) -> pd.DataFrame:
     if not count_frames:
         return pd.DataFrame(columns=["topic_group", count_column])
@@ -248,11 +289,25 @@ def build_dashboard_assets(
     detail_writer: pq.ParquetWriter | None = None
     detail_tmp_path = article_detail_path.with_suffix(article_detail_path.suffix + ".tmp")
 
+    parquet_schema = pq.ParquetFile(str(input_path)).schema_arrow.names
+    missing_read_columns = [column for column in READ_COLUMNS if column not in parquet_schema]
+
+    if missing_read_columns:
+        print(
+            "Clustered parquet is missing dashboard columns: "
+            f"{', '.join(missing_read_columns)}. Enriching from clean data."
+        )
+        legacy_df = pd.read_parquet(input_path)
+        legacy_df = _enrich_legacy_cluster_frame(legacy_df, missing_read_columns)
+        chunk_iter: Iterator[pd.DataFrame] = (
+            legacy_df.iloc[start:start + chunk_size].copy()
+            for start in range(0, len(legacy_df), chunk_size)
+        )
+    else:
+        chunk_iter = _iter_cluster_input_frames(input_path, READ_COLUMNS, chunk_size)
+
     try:
-        for chunk_index, chunk in enumerate(
-            _iter_cluster_input_frames(input_path, READ_COLUMNS, chunk_size),
-            start=1,
-        ):
+        for chunk_index, chunk in enumerate(chunk_iter, start=1):
             if chunk.empty:
                 continue
 
