@@ -35,6 +35,7 @@ from sentence_transformers import SentenceTransformer
 from sklearn.metrics import silhouette_score
 
 from src.config import (
+    COLUMNS_TO_PRESERVE,
     HDBSCAN_DEFAULT_CONFIGS,
     HDBSCAN_TOPIC_CONFIGS,
     MIN_TOPIC_SIZE,
@@ -83,7 +84,8 @@ def load_input_data(nrows: int | None = None) -> pd.DataFrame:
             "Run scripts/DataCuration.py first."
         )
 
-    df = load_clean_data(nrows=nrows)
+    load_columns = [col for col in COLUMNS_TO_PRESERVE if col in {"title", "topics", "short_document", "document"}]
+    df = load_clean_data(nrows=nrows, columns=load_columns)
 
     print("Shape initial:", df.shape)
     print("Columns:", df.columns.tolist())

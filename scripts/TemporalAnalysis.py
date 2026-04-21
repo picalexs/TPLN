@@ -23,6 +23,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from src.paths import CLUSTERED_PARQUET, TEMPORAL_DIR, TEMPORAL_STATS
+from src.io_utils import load_clean_data
 from src.runtime_profile import apply_runtime_profile, detect_runtime_profile, format_runtime_profile
 
 warnings.filterwarnings("ignore")
@@ -155,6 +156,40 @@ def _normalized_entropy(series):
     if max_entropy <= 0:
         return 0.0
     return entropy / max_entropy
+
+
+def _ensure_temporal_columns(df: pd.DataFrame) -> pd.DataFrame:
+    required = ["timestamp", "timestamp_source", "url"]
+    missing = [column for column in required if column not in df.columns]
+    if not missing:
+        return df
+
+    key_columns = ["title", "document", "short_document", "topics"]
+    if not all(column in df.columns for column in key_columns):
+        for column in missing:
+            if column == "timestamp":
+                df[column] = pd.NaT
+            elif column == "timestamp_source":
+                df[column] = "missing"
+            else:
+                df[column] = ""
+        return df
+
+    clean_columns = key_columns + missing
+    clean_df = load_clean_data(columns=clean_columns)
+    clean_subset = clean_df[key_columns + missing].drop_duplicates(subset=key_columns, keep="first")
+    merged = df.merge(clean_subset, on=key_columns, how="left", suffixes=("", "_clean"))
+
+    for column in missing:
+        clean_column = f"{column}_clean"
+        if column in merged.columns and clean_column in merged.columns:
+            merged[column] = merged[column].combine_first(merged[clean_column])
+            merged = merged.drop(columns=[clean_column])
+        elif clean_column in merged.columns:
+            merged[column] = merged[clean_column]
+            merged = merged.drop(columns=[clean_column])
+
+    return merged
 
 
 # ---------------------------------------------------------------------------
@@ -294,6 +329,8 @@ def main() -> int:
 
     df = pd.read_parquet(CLUSTERED_PARQUET)
     print(f"Loaded {len(df)} rows from {CLUSTERED_PARQUET}")
+
+    df = _ensure_temporal_columns(df)
 
     df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
     df["timestamp_source"] = (
