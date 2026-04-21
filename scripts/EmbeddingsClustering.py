@@ -19,6 +19,7 @@ import json
 import os
 import re
 import sys
+from collections import Counter
 from time import perf_counter
 from pathlib import Path
 from typing import Any, cast
@@ -42,9 +43,15 @@ from src.config import (
     HDBSCAN_DEFAULT_CONFIGS,
     HDBSCAN_TOPIC_CONFIGS,
     MIN_TOPIC_SIZE,
+    NEAR_DUPLICATE_COSINE_THRESHOLD,
+    NEAR_DUPLICATE_SEARCH_K,
+    NOISE_REASSIGN_K,
+    NOISE_REASSIGN_MIN_AGREEMENT,
     SBERT_MODEL,
     SHORT_DOCUMENT_MAX_CHARS,
     TEXT_COLUMN,
+    UMAP_MIN_DIST,
+    UMAP_N_COMPONENTS,
     UMAP_N_NEIGHBORS,
     build_hdbscan_configs,
     compute_umap_n_neighbors,
@@ -430,6 +437,123 @@ def maybe_export_knn(
     print(f"Persisted FAISS kNN edges: {knn_path} ({len(records):,} rows)")
 
 
+def _build_flat_faiss_index(embeddings: np.ndarray) -> faiss.Index:
+    """Return an in-memory cosine (inner-product) FAISS index.
+
+    Used as a fallback when persistent FAISS is disabled so that the
+    dedup and noise-reassignment steps always have a nearest-neighbor
+    backend available.
+    """
+    vectors = np.asarray(embeddings, dtype=np.float32)
+    index = faiss.IndexFlatIP(int(vectors.shape[1]))
+    cast(Any, index).add(vectors)
+    return index
+
+
+def detect_near_duplicates(
+    embeddings: np.ndarray,
+    faiss_index: faiss.Index,
+    *,
+    threshold: float,
+    top_k: int,
+) -> np.ndarray:
+    """Group near-identical articles and return each row's canonical index.
+
+    Romanian news outlets heavily syndicate wire copy, so the embedding
+    space contains many near-exact duplicates that collide under UMAP
+    and waste density budget in HDBSCAN. We union rows whose cosine
+    similarity exceeds ``threshold`` into a single group and nominate
+    the lowest-index row as the canonical.
+
+    Returns an array ``canonical_of`` where ``canonical_of[i]`` is the
+    row index of the canonical member of row ``i``'s duplicate group
+    (``canonical_of[i] == i`` when ``i`` is itself canonical). Inputs
+    are assumed to be L2-normalized so inner product equals cosine
+    similarity, which the SBERT pipeline already guarantees.
+    """
+    n = int(embeddings.shape[0])
+    if n == 0:
+        return np.zeros(0, dtype=np.int64)
+
+    query = np.asarray(embeddings, dtype=np.float32)
+    # +1 accounts for the self-match that FAISS always returns first.
+    k = min(top_k + 1, n)
+    sims, neighbors = cast(Any, faiss_index).search(query, k)
+
+    canonical = np.arange(n, dtype=np.int64)
+    for i in range(n):
+        for nb, sim in zip(neighbors[i], sims[i]):
+            nb = int(nb)
+            if nb < 0 or nb == i:
+                continue
+            if sim >= threshold and nb > i and canonical[nb] > i:
+                canonical[nb] = i
+
+    # Path-compress so `canonical[i]` always holds the group's root in
+    # a single hop, even when chains (i -> j -> k) formed above.
+    for i in range(n):
+        root = int(canonical[i])
+        while int(canonical[root]) != root:
+            root = int(canonical[root])
+        canonical[i] = root
+
+    return canonical
+
+
+def reassign_noise_via_knn(
+    labels: np.ndarray,
+    embeddings: np.ndarray,
+    faiss_index: faiss.Index,
+    *,
+    k: int,
+    min_agreement: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Promote HDBSCAN noise points to the cluster their neighbors vote for.
+
+    For each point currently labelled ``-1``, we look at its ``k``
+    nearest already-clustered neighbors in the full SBERT embedding
+    space. When a single cluster captures at least ``min_agreement`` of
+    those votes, the noise point inherits that cluster's label. This
+    mirrors BERTopic's ``reduce_outliers(strategy="embeddings")`` and
+    HDBSCAN's soft-clustering reassignment, but uses the FAISS index
+    the pipeline already builds so it stays fast on 100k-article topics.
+
+    Returns ``(new_labels, reassigned_mask)`` where ``reassigned_mask[i]``
+    is ``True`` iff row ``i`` was promoted from noise to a cluster.
+    """
+    labels = np.asarray(labels)
+    noise_idx = np.where(labels == -1)[0]
+    if len(noise_idx) == 0:
+        return labels, np.zeros(len(labels), dtype=bool)
+
+    search_k = k + 1  # +1 for the self-match
+    queries = np.asarray(embeddings[noise_idx], dtype=np.float32)
+    _, neighbors = cast(Any, faiss_index).search(queries, search_k)
+
+    new_labels = labels.copy()
+    reassigned = np.zeros(len(labels), dtype=bool)
+    for local_i, global_i in enumerate(noise_idx):
+        neighbor_labels: list[int] = []
+        for nb in neighbors[local_i]:
+            nb = int(nb)
+            if nb < 0 or nb == int(global_i):
+                continue
+            lab = int(labels[nb])
+            if lab == -1:
+                continue
+            neighbor_labels.append(lab)
+            if len(neighbor_labels) >= k:
+                break
+        if not neighbor_labels:
+            continue
+        best_label, best_count = Counter(neighbor_labels).most_common(1)[0]
+        if best_count / len(neighbor_labels) >= min_agreement:
+            new_labels[global_i] = best_label
+            reassigned[global_i] = True
+
+    return new_labels, reassigned
+
+
 def print_neighbor_examples(index: faiss.Index, embeddings: np.ndarray, df_topic: pd.DataFrame) -> None:
     distances, indices = cast(
         Any,
@@ -469,7 +593,8 @@ def fit_umap_for_clustering(
 
     base_kwargs = {
         "n_neighbors": resolved_neighbors,
-        "n_components": 15,
+        "n_components": UMAP_N_COMPONENTS,
+        "min_dist": UMAP_MIN_DIST,
         "metric": "cosine",
         "low_memory": low_memory,
         "n_jobs": cpu_threads,
@@ -786,13 +911,25 @@ def to_results_rows(topic_name: str, topic_size: int, topic_results: list[dict[s
 def apply_best_labels(
     df_topic: pd.DataFrame,
     best_result: dict[str, Any],
-    scatter_projection: np.ndarray,
+    full_labels: np.ndarray,
+    full_reasons: np.ndarray,
+    full_membership_strength: np.ndarray,
+    full_outlier_score: np.ndarray,
+    full_scatter: np.ndarray,
     global_cluster_offset: int,
 ) -> tuple[pd.DataFrame, int]:
+    """Attach cluster labels and metadata to the per-topic dataframe.
+
+    All array inputs are pre-computed in ``process_topic`` at full-topic
+    length. This function only worries about offsetting labels into the
+    global cluster namespace, persisting the best-config hyperparameters,
+    and returning the updated offset.
+    """
     print(f"\nBest config for {df_topic['topic_group'].iloc[0]}: {best_result['cfg']}")
     print(
-        f"  Clusters: {best_result['num_clusters']}, "
-        f"Noise: {best_result['num_noise']} ({best_result['noise_percent']:.1f}%), "
+        f"  Canonical clusters: {best_result['num_clusters']}, "
+        f"canonical noise: {best_result['num_noise']} "
+        f"({best_result['noise_percent']:.1f}%), "
         f"Silhouette: {best_result['silhouette']}"
     )
 
@@ -803,24 +940,22 @@ def apply_best_labels(
     df_topic["best_cluster_selection_epsilon"] = best_result["cfg"].get("cluster_selection_epsilon", 0.0)
     df_topic["topic_is_eligible"] = True
 
-    local_labels = best_result["labels"]
-    df_topic["cluster"] = [-1 if label == -1 else label + global_cluster_offset for label in local_labels]
-    clusterer = best_result["clusterer"]
-    membership_strength = getattr(clusterer, "probabilities_", None)
-    if membership_strength is None or len(membership_strength) != len(df_topic):
-        membership_strength = np.full(len(df_topic), np.nan, dtype=np.float32)
-    outlier_score = getattr(clusterer, "outlier_scores_", None)
-    if outlier_score is None or len(outlier_score) != len(df_topic):
-        outlier_score = np.full(len(df_topic), np.nan, dtype=np.float32)
-    df_topic["cluster_membership_strength"] = np.asarray(membership_strength, dtype=np.float32)
-    df_topic["cluster_outlier_score"] = np.asarray(outlier_score, dtype=np.float32)
-    df_topic["cluster_assignment_reason"] = np.where(np.asarray(local_labels) == -1, "hdbscan_noise", "clustered")
+    offset_labels = np.where(
+        full_labels == -1,
+        -1,
+        full_labels.astype(np.int64) + int(global_cluster_offset),
+    )
+    df_topic["cluster"] = offset_labels
+    df_topic["cluster_membership_strength"] = np.asarray(full_membership_strength, dtype=np.float32)
+    df_topic["cluster_outlier_score"] = np.asarray(full_outlier_score, dtype=np.float32)
+    df_topic["cluster_assignment_reason"] = np.asarray(full_reasons, dtype=object)
 
-    scatter_projection = np.asarray(scatter_projection, dtype=np.float32)
-    df_topic["umap_x"] = scatter_projection[:, 0]
-    df_topic["umap_y"] = scatter_projection[:, 1]
+    full_scatter = np.asarray(full_scatter, dtype=np.float32)
+    df_topic["umap_x"] = full_scatter[:, 0]
+    df_topic["umap_y"] = full_scatter[:, 1]
 
-    real_local_clusters = len(set(local_labels)) - (1 if -1 in local_labels else 0)
+    canonical_labels = np.asarray(best_result["labels"])
+    real_local_clusters = len(set(canonical_labels.tolist())) - (1 if -1 in canonical_labels else 0)
     return df_topic, global_cluster_offset + max(real_local_clusters, 0)
 
 
@@ -861,7 +996,13 @@ def process_topic(
     )
     embedding_seconds = perf_counter() - embed_start
 
+    n_total = int(len(df_topic))
+
+    # --- FAISS: build or reuse. Always keep a handle around because the
+    #     dedup and noise-reassignment steps need a nearest-neighbor
+    #     backend even when persistence is disabled via --disable-faiss.
     faiss_seconds = 0.0
+    faiss_index: faiss.Index | None = None
     if faiss_enabled:
         faiss_start = perf_counter()
         faiss_index, faiss_meta, created = get_or_create_faiss_index(
@@ -888,59 +1029,169 @@ def process_topic(
         if debug_neighbors:
             print_neighbor_examples(faiss_index, embeddings, df_topic)
         faiss_seconds = perf_counter() - faiss_start
-    elif debug_neighbors:
-        tmp_index = faiss.IndexFlatIP(embeddings.shape[1])
-        cast(Any, tmp_index).add(np.asarray(embeddings, dtype=np.float32))
-        print_neighbor_examples(tmp_index, embeddings, df_topic)
+    else:
+        print("  Building in-memory FAISS index for dedup and noise reassignment...")
+        faiss_index = _build_flat_faiss_index(embeddings)
+        if debug_neighbors:
+            print_neighbor_examples(faiss_index, embeddings, df_topic)
+
+    # --- Near-duplicate detection: reduce to canonical embeddings so
+    #     UMAP doesn't see cosine ~1.0 point collisions from syndicated
+    #     wire copy.
+    dedup_start = perf_counter()
+    canonical_of = detect_near_duplicates(
+        embeddings,
+        faiss_index,
+        threshold=NEAR_DUPLICATE_COSINE_THRESHOLD,
+        top_k=NEAR_DUPLICATE_SEARCH_K,
+    )
+    canonical_unique_idx = np.unique(canonical_of)
+    n_canonical = int(len(canonical_unique_idx))
+    n_duplicate = n_total - n_canonical
+    dedup_seconds = perf_counter() - dedup_start
+    print(
+        f"\nNear-duplicates (cosine >= {NEAR_DUPLICATE_COSINE_THRESHOLD}): "
+        f"{n_duplicate:,} duplicates collapsed into {n_canonical:,} canonicals "
+        f"({100.0 * n_duplicate / max(n_total, 1):.1f}% dup share)"
+    )
+
+    # Reduce to canonical embeddings for UMAP and HDBSCAN.
+    embeddings_canon = np.asarray(embeddings[canonical_unique_idx], dtype=np.float32)
 
     umap_start = perf_counter()
-    umap_n_neighbors = compute_umap_n_neighbors(len(df_topic))
+    umap_n_neighbors = compute_umap_n_neighbors(n_canonical)
     print(
-        f"\nReducing dimensions with UMAP 15-D for clustering and scatter "
-        f"(n_neighbors={umap_n_neighbors})..."
+        f"\nReducing dimensions with UMAP {UMAP_N_COMPONENTS}-D "
+        f"(n_neighbors={umap_n_neighbors}, min_dist={UMAP_MIN_DIST}, "
+        f"canonical rows={n_canonical:,})..."
     )
-    embeddings_reduced = fit_umap_for_clustering(
-        embeddings,
+    embeddings_reduced_canon = fit_umap_for_clustering(
+        embeddings_canon,
         cpu_threads=core_dist_n_jobs,
         n_neighbors=umap_n_neighbors,
     )
-    print(f"UMAP 15-D shape: {embeddings_reduced.shape}")
-    scatter_projection = build_scatter_projection(embeddings_reduced)
+    print(f"UMAP {UMAP_N_COMPONENTS}-D shape: {embeddings_reduced_canon.shape}")
+    scatter_canon = build_scatter_projection(embeddings_reduced_canon)
     umap_seconds = perf_counter() - umap_start
 
-    silhouette_sample_idx = create_silhouette_sample_indices(len(df_topic))
+    # --- HDBSCAN sweep runs on canonicals. Metrics in topic_results
+    #     therefore describe the canonical clustering; duplicates and
+    #     noise-reassigned rows are book-keeping after the fact.
+    silhouette_sample_idx = create_silhouette_sample_indices(n_canonical)
     hdbscan_start = perf_counter()
     best_result, topic_results = evaluate_topic_configs(
         topic_name=topic_name,
-        topic_size=len(df_topic),
-        embeddings_reduced=embeddings_reduced,
-        embeddings_full=embeddings,
+        topic_size=n_canonical,
+        embeddings_reduced=embeddings_reduced_canon,
+        embeddings_full=embeddings_canon,
         silhouette_sample_idx=silhouette_sample_idx,
         core_dist_n_jobs=core_dist_n_jobs,
     )
     hdbscan_seconds = perf_counter() - hdbscan_start
+
+    # --- Propagate canonical labels / UMAP coords / HDBSCAN stats back
+    #     to every row in the topic.
+    canonical_labels = np.asarray(best_result["labels"], dtype=np.int64)
+    canon_to_local_idx = {
+        int(canonical_unique_idx[i]): i for i in range(n_canonical)
+    }
+    local_indices_per_row = np.asarray(
+        [canon_to_local_idx[int(c)] for c in canonical_of],
+        dtype=np.int64,
+    )
+    full_labels = canonical_labels[local_indices_per_row].copy()
+    full_scatter = scatter_canon[local_indices_per_row].copy()
+
+    clusterer = best_result["clusterer"]
+    canonical_strength = getattr(clusterer, "probabilities_", None)
+    canonical_outlier = getattr(clusterer, "outlier_scores_", None)
+    if canonical_strength is None or len(canonical_strength) != n_canonical:
+        canonical_strength = np.full(n_canonical, np.nan, dtype=np.float32)
+    if canonical_outlier is None or len(canonical_outlier) != n_canonical:
+        canonical_outlier = np.full(n_canonical, np.nan, dtype=np.float32)
+    full_membership_strength = np.asarray(
+        canonical_strength, dtype=np.float32
+    )[local_indices_per_row].copy()
+    full_outlier_score = np.asarray(
+        canonical_outlier, dtype=np.float32
+    )[local_indices_per_row].copy()
+
+    # --- Noise reassignment via k-NN vote on the full (canonical +
+    #     duplicate) label array. Duplicate rows already carry their
+    #     canonical's label, so they also vote.
+    reassign_start = perf_counter()
+    n_noise_before = int((full_labels == -1).sum())
+    reassigned_labels, reassigned_mask = reassign_noise_via_knn(
+        full_labels,
+        embeddings,
+        faiss_index,
+        k=NOISE_REASSIGN_K,
+        min_agreement=NOISE_REASSIGN_MIN_AGREEMENT,
+    )
+    n_noise_after = int((reassigned_labels == -1).sum())
+    reassign_seconds = perf_counter() - reassign_start
+    print(
+        f"\nNoise reassignment ({NOISE_REASSIGN_K}-NN, "
+        f"min_agreement={NOISE_REASSIGN_MIN_AGREEMENT}): "
+        f"{n_noise_before:,} -> {n_noise_after:,} "
+        f"(recovered {int(reassigned_mask.sum()):,})"
+    )
+    # Rows promoted from noise get NaN membership / outlier values:
+    # HDBSCAN never saw them as cluster members.
+    full_membership_strength[reassigned_mask] = np.nan
+    full_outlier_score[reassigned_mask] = np.nan
+
+    # --- Final per-row cluster_assignment_reason classification.
+    is_canonical_row = canonical_of == np.arange(n_total, dtype=np.int64)
+    reasons = np.full(n_total, "hdbscan_noise", dtype=object)
+    clustered_canonical_mask = is_canonical_row & (full_labels != -1)
+    clustered_duplicate_mask = (~is_canonical_row) & (full_labels != -1)
+    reasons[clustered_canonical_mask] = "clustered"
+    reasons[clustered_duplicate_mask] = "duplicate_of_clustered"
+    reasons[reassigned_mask] = "reassigned_from_noise"
+
     label_start = perf_counter()
     labelled_topic, next_offset = apply_best_labels(
         df_topic=df_topic,
         best_result=best_result,
-        scatter_projection=scatter_projection,
+        full_labels=reassigned_labels,
+        full_reasons=reasons,
+        full_membership_strength=full_membership_strength,
+        full_outlier_score=full_outlier_score,
+        full_scatter=full_scatter,
         global_cluster_offset=global_cluster_offset,
     )
     label_seconds = perf_counter() - label_start
 
+    final_noise_pct = 100.0 * n_noise_after / max(n_total, 1)
+    print(
+        f"  Final topic composition: "
+        f"{int(clustered_canonical_mask.sum()):,} canonical-clustered | "
+        f"{int(clustered_duplicate_mask.sum()):,} duplicate-of-clustered | "
+        f"{int(reassigned_mask.sum()):,} reassigned-from-noise | "
+        f"{n_noise_after:,} final-noise ({final_noise_pct:.1f}%)"
+    )
+
     topic_total_seconds = perf_counter() - topic_wall_start
     timing_row = {
         "topic_group": topic_name,
-        "topic_size": int(len(df_topic)),
+        "topic_size": n_total,
+        "canonical_size": n_canonical,
+        "duplicate_rows": n_duplicate,
+        "reassigned_rows": int(reassigned_mask.sum()),
+        "final_noise_rows": n_noise_after,
+        "final_noise_percent": round(final_noise_pct, 4),
         "embedding_seconds": round(embedding_seconds, 4),
         "faiss_seconds": round(faiss_seconds, 4),
+        "dedup_seconds": round(dedup_seconds, 4),
         "umap_seconds": round(umap_seconds, 4),
         "hdbscan_sweep_seconds": round(hdbscan_seconds, 4),
+        "reassign_seconds": round(reassign_seconds, 4),
         "label_apply_seconds": round(label_seconds, 4),
         "topic_total_seconds": round(topic_total_seconds, 4),
-        "rows_per_second": round(len(df_topic) / max(topic_total_seconds, 1e-6), 4),
+        "rows_per_second": round(n_total / max(topic_total_seconds, 1e-6), 4),
     }
-    return labelled_topic, to_results_rows(topic_name, len(df_topic), topic_results), next_offset, timing_row
+    return labelled_topic, to_results_rows(topic_name, n_canonical, topic_results), next_offset, timing_row
 
 
 def build_small_topics_noise(df: pd.DataFrame, eligible_topics: list[str]) -> pd.DataFrame:
@@ -1150,10 +1401,17 @@ def main() -> int:
         {
             "topic_group": "__GLOBAL__",
             "topic_size": int(len(df)),
+            "canonical_size": None,
+            "duplicate_rows": None,
+            "reassigned_rows": None,
+            "final_noise_rows": None,
+            "final_noise_percent": None,
             "embedding_seconds": None,
             "faiss_seconds": None,
+            "dedup_seconds": None,
             "umap_seconds": None,
             "hdbscan_sweep_seconds": None,
+            "reassign_seconds": None,
             "label_apply_seconds": None,
             "topic_total_seconds": round(total_seconds, 4),
             "rows_per_second": round(len(df) / max(total_seconds, 1e-6), 4),

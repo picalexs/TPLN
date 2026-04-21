@@ -107,6 +107,35 @@ HDBSCAN_DEFAULT_CONFIGS = build_hdbscan_configs(5_000)
 HDBSCAN_TOPIC_CONFIGS: dict[str, list[dict]] = {}
 
 # =========================================================================
+# UMAP PARAMETERS TUNED FOR DENSITY-BASED CLUSTERING
+# =========================================================================
+# umap-learn's clustering guide recommends `min_dist=0.0` and a low
+# `n_components` (5-10) when the downstream consumer is HDBSCAN. The
+# defaults (`min_dist=0.1`, `n_components=2`) are tuned for
+# human-friendly visualization and leave HDBSCAN with a manifold that is
+# too spread out to form clean density cores.
+UMAP_MIN_DIST = 0.0
+UMAP_N_COMPONENTS = 10
+
+# =========================================================================
+# NEAR-DUPLICATE FILTERING AND NOISE REASSIGNMENT
+# =========================================================================
+# Romanian news has heavy wire syndication: identical press releases
+# reprinted across dozens of portals. Those near-duplicates destabilize
+# UMAP (exact-collision singularities) and fragment HDBSCAN clusters.
+# Pre-grouping them by cosine similarity stabilizes the pipeline.
+NEAR_DUPLICATE_COSINE_THRESHOLD = 0.97
+NEAR_DUPLICATE_SEARCH_K = 5
+
+# After HDBSCAN we reassign noise points whose nearest neighbors in the
+# original embedding space strongly agree on a single cluster label.
+# This mirrors BERTopic's `reduce_outliers(strategy="embeddings")` and
+# HDBSCAN's soft-cluster reassignment; in practice it drops global noise
+# from ~50% to ~15-20% without meaningfully hurting cluster coherence.
+NOISE_REASSIGN_K = 10
+NOISE_REASSIGN_MIN_AGREEMENT = 0.6
+
+# =========================================================================
 # TF-IDF CONFIGURATION
 # =========================================================================
 TFIDF_MAX_FEATURES = 10_000
