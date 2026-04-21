@@ -107,11 +107,7 @@ def load_input_data(nrows: int | None = None) -> pd.DataFrame:
             "Run scripts/DataCuration.py first."
         )
 
-    # `document_nostop` is optional at the clean-data layer but strongly
-    # preferred downstream by TemporalAnalysis for c-TF-IDF cluster
-    # labels. Pulling it through here costs one extra column in the
-    # clustered parquet and avoids a silent fallback to `short_document`
-    # (which still contains Romanian stopwords).
+    # Carry `document_nostop` so TemporalAnalysis c-TF-IDF skips Romanian stopwords.
     load_columns = [
         col for col in COLUMNS_TO_PRESERVE
         if col in {"title", "topics", "short_document", "document", "document_nostop"}
@@ -189,13 +185,7 @@ def encode_documents(
 
 
 def _documents_fingerprint(documents: list[str]) -> str:
-    """Compact hash over document count plus sampled content.
-
-    We cannot hash every row (too slow on 100k+ topics), but we want to
-    detect the common "text column was regenerated" case (e.g. the
-    SHORT_DOCUMENT_MAX_CHARS slice length changed). A handful of sampled
-    documents combined with the total count is sufficient in practice.
-    """
+    """Sample-based hash for detecting bulk text-column regeneration."""
     if not documents:
         return hashlib.sha1(b"empty").hexdigest()
     sample_indices = [0, len(documents) // 2, len(documents) - 1]
@@ -276,7 +266,7 @@ def resolve_sentence_transformer_device(device_name: str):
 
 
 def _compute_documents_fingerprint(documents: list[str]) -> str:
-    """Create a stable fingerprint so FAISS indexes can be reused safely."""
+    """Full-document SHA-256 fingerprint used by the FAISS index cache."""
     hasher = hashlib.sha256()
     for doc in documents:
         hasher.update(str(doc).encode("utf-8", errors="ignore"))
@@ -419,13 +409,8 @@ def maybe_export_knn(
     if k < 1:
         return
 
-    # For IVF-Flat indexes, temporarily raise nprobe to nlist so the
-    # exported neighbor list is effectively exhaustive. The dashboard
-    # surfaces these rows directly as "Semantic Neighbor Evidence";
-    # approximate recall at the default nprobe creates confusing,
-    # non-reproducible evidence tables. Restore the original nprobe
-    # afterwards so any later queries on the same handle keep their
-    # lower-latency profile.
+    # For IVF-Flat, bump nprobe to nlist so the exported neighbor list
+    # is exhaustive; restore it afterwards.
     original_nprobe: int | None = None
     try:
         if hasattr(index, "nprobe") and hasattr(index, "nlist"):
@@ -469,12 +454,7 @@ def maybe_export_knn(
 
 
 def _build_flat_faiss_index(embeddings: np.ndarray) -> faiss.Index:
-    """Return an in-memory cosine (inner-product) FAISS index.
-
-    Used as a fallback when persistent FAISS is disabled so that the
-    dedup and noise-reassignment steps always have a nearest-neighbor
-    backend available.
-    """
+    """Return an exact in-memory inner-product FAISS index."""
     vectors = np.asarray(embeddings, dtype=np.float32)
     index = faiss.IndexFlatIP(int(vectors.shape[1]))
     cast(Any, index).add(vectors)
@@ -488,19 +468,11 @@ def detect_near_duplicates(
     threshold: float,
     top_k: int,
 ) -> np.ndarray:
-    """Group near-identical articles and return each row's canonical index.
+    """Union near-identical rows; return each row's canonical index.
 
-    Romanian news outlets heavily syndicate wire copy, so the embedding
-    space contains many near-exact duplicates that collide under UMAP
-    and waste density budget in HDBSCAN. We union rows whose cosine
-    similarity exceeds ``threshold`` into a single group and nominate
-    the lowest-index row as the canonical.
-
-    Returns an array ``canonical_of`` where ``canonical_of[i]`` is the
-    row index of the canonical member of row ``i``'s duplicate group
-    (``canonical_of[i] == i`` when ``i`` is itself canonical). Inputs
-    are assumed to be L2-normalized so inner product equals cosine
-    similarity, which the SBERT pipeline already guarantees.
+    ``canonical_of[i]`` is the row index of row ``i``'s canonical
+    (equal to ``i`` when ``i`` is itself canonical). Inputs must be
+    L2-normalized so inner product equals cosine similarity.
     """
     n = int(embeddings.shape[0])
     if n == 0:
@@ -540,25 +512,12 @@ def reassign_noise_via_knn(
     k: int,
     min_agreement: float,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Promote HDBSCAN noise points to the cluster their neighbors vote for.
+    """Promote noise points to the cluster their k-NN neighbors agree on.
 
-    For each point currently labelled ``-1``, we look at its ``k``
-    nearest already-clustered neighbors in the full SBERT embedding
-    space. When a single cluster captures at least ``min_agreement`` of
-    those votes, the noise point inherits that cluster's label. This
-    mirrors BERTopic's ``reduce_outliers(strategy="embeddings")`` and
-    HDBSCAN's soft-clustering reassignment, but uses the FAISS index
-    the pipeline already builds so it stays fast on 100k-article topics.
+    Votes are collapsed to one per canonical so syndicated copies of
+    the same article cannot dominate the agreement ratio.
 
-    Votes are collapsed to one per canonical: Romanian wire syndication
-    produces many near-identical copies that all carry the same label,
-    and letting each copy vote independently causes the agreement
-    threshold to be met trivially by whichever cluster happens to have
-    the most syndicators near the noise point, rather than by the
-    cluster with the most distinct neighbors.
-
-    Returns ``(new_labels, reassigned_mask)`` where ``reassigned_mask[i]``
-    is ``True`` iff row ``i`` was promoted from noise to a cluster.
+    Returns ``(new_labels, reassigned_mask)``.
     """
     labels = np.asarray(labels)
     canonical_of = np.asarray(canonical_of, dtype=np.int64)
@@ -566,12 +525,7 @@ def reassign_noise_via_knn(
     if len(noise_idx) == 0:
         return labels, np.zeros(len(labels), dtype=bool)
 
-    # Over-sample the neighbor list so that, after collapsing votes by
-    # canonical, we still reach ``k`` distinct-canonical votes in the
-    # common case. A syndicated story can produce >10 consecutive
-    # duplicates in the sorted neighbor list; stopping at ``k + 1`` would
-    # leave us with only a handful of distinct votes and distort the
-    # agreement check.
+    # Over-sample: after canonical dedup we still want ~k distinct votes.
     index_total = int(cast(Any, faiss_index).ntotal)
     search_k = min(max(k * 3 + 1, k + 1), max(index_total, 1))
     queries = np.asarray(embeddings[noise_idx], dtype=np.float32)
@@ -596,6 +550,7 @@ def reassign_noise_via_knn(
             neighbor_labels.append(lab)
             if len(neighbor_labels) >= k:
                 break
+
         if not neighbor_labels:
             continue
         best_label, best_count = Counter(neighbor_labels).most_common(1)[0]
@@ -803,19 +758,7 @@ def compute_selection_score(
     sil_score: float | None,
     topic_size: int,
 ) -> float:
-    """Score an HDBSCAN config, preferring balanced cluster layouts.
-
-    The score rewards low-noise configurations but heavily penalizes
-    two degenerate failure modes:
-
-    * Collapse: a single cluster swallows most of the topic
-      (`largest_real / topic_size > 0.5`).
-    * Under-segmentation: fewer than three real clusters.
-
-    Without these guards the raw `(100 - noise_percent)` term tempts the
-    selector to pick "1 giant cluster + 1% noise" over any meaningful
-    partition.
-    """
+    """Score an HDBSCAN config; penalises collapse and under-segmentation."""
     largest_share = largest_real / topic_size if topic_size else 0.0
     sil_bonus = sil_score * 20 if sil_score is not None else 0
     cluster_bonus = min(num_clusters, 100) / 10
@@ -859,9 +802,7 @@ def evaluate_topic_configs(
             "min_samples": cfg["min_samples"],
             "metric": "euclidean",
             "prediction_data": True,
-            # On Windows, joblib multiprocessing uses Win32 IPC pipes that overflow
-            # (WinError 1450) when pickling large KD-tree payloads.  Force single-
-            # threaded core-distance computation; the tree build itself is fast enough.
+            # Windows joblib IPC pipes overflow (WinError 1450) on large KD-tree payloads.
             "core_dist_n_jobs": 1 if sys.platform == "win32" else core_dist_n_jobs,
         }
         if "cluster_selection_epsilon" in cfg:
@@ -945,10 +886,6 @@ def to_results_rows(
         rows.append(
             {
                 "topic_group": topic_name,
-                # ``topic_size`` is the true number of articles in the
-                # topic; ``canonical_size`` is how many unique canonicals
-                # remained after near-duplicate collapse, which is what
-                # HDBSCAN actually clustered.
                 "topic_size": topic_size,
                 "canonical_size": canonical_size,
                 "min_cluster_size": cfg["min_cluster_size"],
@@ -980,13 +917,7 @@ def apply_best_labels(
     full_scatter: np.ndarray,
     global_cluster_offset: int,
 ) -> tuple[pd.DataFrame, int]:
-    """Attach cluster labels and metadata to the per-topic dataframe.
-
-    All array inputs are pre-computed in ``process_topic`` at full-topic
-    length. This function only worries about offsetting labels into the
-    global cluster namespace, persisting the best-config hyperparameters,
-    and returning the updated offset.
-    """
+    """Attach cluster labels and metadata; return the updated global offset."""
     print(f"\nBest config for {df_topic['topic_group'].iloc[0]}: {best_result['cfg']}")
     print(
         f"  Canonical clusters: {best_result['num_clusters']}, "
@@ -1060,20 +991,13 @@ def process_topic(
 
     n_total = int(len(df_topic))
 
-    # Exact flat cosine index. Dedup, noise reassignment, and debug
-    # neighbor inspection all route through this handle: they must be
-    # deterministic and must return true top-k neighbors. An IVF-Flat
-    # index with a fractional nprobe silently misses near-duplicates
-    # that land in unprobed cells, causing run-to-run drift in the
-    # canonical mapping and biased noise-reassignment votes.
+    # Exact index for dedup / noise-reassign / debug — must be deterministic.
     faiss_index: faiss.Index = _build_flat_faiss_index(embeddings)
 
     faiss_seconds = 0.0
     if faiss_enabled:
         faiss_start = perf_counter()
-        # Persistent index is only used by the kNN export below. Its
-        # IVF-Flat variant is cheaper for the one-shot export query and
-        # is the on-disk cache re-read on subsequent runs.
+        # Persistent (optionally IVF-Flat) index, used only by the kNN export.
         persistent_index, faiss_meta, created = get_or_create_faiss_index(
             topic_name=topic_name,
             embeddings=embeddings,
@@ -1100,9 +1024,7 @@ def process_topic(
     if debug_neighbors:
         print_neighbor_examples(faiss_index, embeddings, df_topic)
 
-    # --- Near-duplicate detection: reduce to canonical embeddings so
-    #     UMAP doesn't see cosine ~1.0 point collisions from syndicated
-    #     wire copy.
+    # Near-duplicate dedup so UMAP doesn't see cosine ~1.0 collisions.
     dedup_start = perf_counter()
     canonical_of = detect_near_duplicates(
         embeddings,
@@ -1139,9 +1061,7 @@ def process_topic(
     scatter_canon = build_scatter_projection(embeddings_reduced_canon)
     umap_seconds = perf_counter() - umap_start
 
-    # --- HDBSCAN sweep runs on canonicals. Metrics in topic_results
-    #     therefore describe the canonical clustering; duplicates and
-    #     noise-reassigned rows are book-keeping after the fact.
+    # HDBSCAN sweep runs on canonicals; duplicates + reassignments are book-keeping.
     silhouette_sample_idx = create_silhouette_sample_indices(n_canonical)
     hdbscan_start = perf_counter()
     best_result, topic_results = evaluate_topic_configs(
@@ -1154,8 +1074,7 @@ def process_topic(
     )
     hdbscan_seconds = perf_counter() - hdbscan_start
 
-    # --- Propagate canonical labels / UMAP coords / HDBSCAN stats back
-    #     to every row in the topic.
+    # Propagate canonical labels / UMAP coords / HDBSCAN stats back to every row.
     canonical_labels = np.asarray(best_result["labels"], dtype=np.int64)
     canon_to_local_idx = {
         int(canonical_unique_idx[i]): i for i in range(n_canonical)
@@ -1181,9 +1100,7 @@ def process_topic(
         canonical_outlier, dtype=np.float32
     )[local_indices_per_row].copy()
 
-    # --- Noise reassignment via k-NN vote on the full (canonical +
-    #     duplicate) label array. Duplicate rows already carry their
-    #     canonical's label, so they also vote.
+    # Noise reassignment via k-NN vote over the full (canonical + duplicate) label array.
     reassign_start = perf_counter()
     n_noise_before = int((full_labels == -1).sum())
     reassigned_labels, reassigned_mask = reassign_noise_via_knn(
@@ -1202,12 +1119,10 @@ def process_topic(
         f"{n_noise_before:,} -> {n_noise_after:,} "
         f"(recovered {int(reassigned_mask.sum()):,})"
     )
-    # Rows promoted from noise get NaN membership / outlier values:
-    # HDBSCAN never saw them as cluster members.
+    # Reassigned-from-noise rows get NaN HDBSCAN stats (never seen as members).
     full_membership_strength[reassigned_mask] = np.nan
     full_outlier_score[reassigned_mask] = np.nan
 
-    # --- Final per-row cluster_assignment_reason classification.
     is_canonical_row = canonical_of == np.arange(n_total, dtype=np.int64)
     reasons = np.full(n_total, "hdbscan_noise", dtype=object)
     clustered_canonical_mask = is_canonical_row & (full_labels != -1)

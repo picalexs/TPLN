@@ -157,12 +157,7 @@ def _normalize_domain(url_value):
 
 
 def _pick_cluster_label_text_column(df: pd.DataFrame) -> str:
-    """Return the first available text column for cluster labelling.
-
-    Prefers the already-stopword-filtered column (so c-TF-IDF doesn't
-    have to filter Romanian function words itself), falling back to
-    length-capped short documents, then to the raw document field.
-    """
+    """Return the preferred text column for c-TF-IDF cluster labelling."""
     for candidate in (CLUSTER_LABEL_TEXT_COLUMN, "short_document", "document", "text"):
         if candidate in df.columns:
             return candidate
@@ -179,15 +174,7 @@ def compute_cluster_cfidf_terms(
     text_column: str,
     top_n: int,
 ) -> dict[int, list[str]]:
-    """Return the top class-TF-IDF terms per real cluster.
-
-    We concatenate every article in a cluster into a single "class
-    document" and run a standard TF-IDF on the class documents. Terms
-    shared across all clusters get low IDF and self-suppress, leaving
-    each cluster with the vocabulary that actually distinguishes it.
-    This is the BERTopic formulation but implemented with sklearn so
-    we don't pull in a heavy dependency.
-    """
+    """Return the top class-TF-IDF terms per real cluster (BERTopic-style)."""
     class_docs = (
         df_clustered.groupby("cluster", sort=True)[text_column]
         .apply(lambda s: " ".join(s.fillna("").astype(str).tolist()))
@@ -234,17 +221,7 @@ def pick_representative_titles(
     *,
     top_n: int,
 ) -> dict[int, list[str]]:
-    """Select the most cluster-core titles per cluster.
-
-    HDBSCAN's `cluster_membership_strength` column already ranks each
-    article by how central it is to its cluster (higher = closer to
-    the density core). We pick the top-`top_n` strongest titles,
-    deduplicating near-identical wire copies along the way.
-
-    Reassigned-from-noise and duplicate-of-clustered rows have NaN
-    strength; they're pushed to the back and used only as fillers when
-    a cluster is short on canonical members.
-    """
+    """Pick the cluster-core titles per cluster by membership strength."""
     if "title" not in df_clustered.columns:
         return {}
 
@@ -347,16 +324,7 @@ def kleinberg_burst(event_times, s=2.0, gamma=1.0, freq="D"):
     if len(event_times) < MIN_ARTICLES_FOR_BURST:
         return 0, []
 
-    # Fixed freq strings: '7D' for weekly, 'D' for daily.
     rng_freq = "7D" if freq == "W" else "D"
-
-    # Two-state Kleinberg implemented inline. We deliberately do not
-    # fall back to the PyPI `burst_detection` package: its public API
-    # is `burst_detection(r, d, n, s, gamma, smooth_win)` and it
-    # returns a tuple rather than a state vector, so every call site
-    # in that earlier integration raised silently and this manual
-    # implementation ran anyway. Keeping one code path avoids the
-    # deceptive appearance of a library-backed detector.
     dates = event_times.sort_values()
 
     if freq == "W":
@@ -579,11 +547,7 @@ def main() -> int:
         # Concentration: timestamped articles / span_days
         concentration = article_count_ts / max(span_days, 1)
 
-        # Confidence weights keep sparse / low-coverage clusters from over-ranking.
-        # Calibrated for the observed corpus where median timestamp coverage is
-        # only ~14% and many clusters span a long calendar range. The previous
-        # calibration (coverage base 0.35, linear slope 0.65) drove the median
-        # suspicion_score to zero because coverage_weight alone started at ~0.44.
+        # Confidence weights soften sparse / low-coverage clusters without zeroing them out.
         support_weight = min(1.0, article_count_ts / 10.0)
         coverage_weight = min(1.0, 0.55 + (0.45 * timestamp_coverage_ratio))
         source_weight = 0.55 + (0.45 * min(1.0, timestamp_source_reliability))
@@ -591,12 +555,7 @@ def main() -> int:
         burst_duration_share_daily = burst_dur_daily / max(span_days, 1)
         burst_duration_share_weekly = min((burst_dur_weekly * 7) / max(span_days, 1), 1.0)
 
-        # Explicit penalties for cases that were over-ranking before.
-        # The long-sparse penalty previously blew up at ~46 points for a median
-        # cluster (span ~530 days, active_day_ratio ~0.01, coverage ~0.14),
-        # overwhelming any suspicion signal. We cap the (span_days - 90)/90
-        # ratio and halve the multiplier so the penalty still discourages
-        # sprawling clusters without annihilating the score.
+        # Penalty for sprawling, low-coverage clusters (capped so it can't drown out burst).
         long_sparse_span_penalty = (
             math.log1p(span_days)
             * min(3.0, max(0.0, span_days - 90) / 90.0)
@@ -639,11 +598,7 @@ def main() -> int:
         )
         suspicion_score = round(suspicion_score, 3)
 
-        # Single-source flag: clusters dominated by a single domain are
-        # almost always scraper/aggregator artefacts rather than
-        # coordinated activity across Romanian outlets. Zero them out in
-        # the multi-source ranking so the dashboard can surface the
-        # genuinely cross-outlet suspicious stories separately.
+        # Single-source clusters are usually scraper artefacts; zeroed in the multi-source ranking.
         is_single_source = bool(
             top_domain_share >= SINGLE_SOURCE_TOP_DOMAIN_SHARE
             and domain_count <= SINGLE_SOURCE_MAX_DOMAIN_COUNT
