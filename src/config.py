@@ -143,6 +143,29 @@ TFIDF_NGRAM = (1, 2)
 TOP_TERMS_PER_CLUSTER = 10
 
 # =========================================================================
+# CLUSTER INTERPRETABILITY (c-TF-IDF labels + representative titles)
+# =========================================================================
+# Class-based TF-IDF treats every cluster as a single "document" and
+# extracts terms that distinguish it from all other clusters. This is
+# the BERTopic formulation for topic labels; see MaartenGr/BERTopic.
+CLUSTER_LABEL_TOP_TERMS = 10
+CLUSTER_REPRESENTATIVE_TITLES = 5
+# Text column used to build each cluster's class document. Falls back
+# to `short_document` or `document` when the preferred column is
+# missing from the parquet.
+CLUSTER_LABEL_TEXT_COLUMN = "document_nostop"
+
+# =========================================================================
+# SINGLE-SOURCE CLUSTER FLAGGING
+# =========================================================================
+# Clusters whose articles come overwhelmingly from one outlet are almost
+# always scraper/aggregator artefacts, not coordinated campaigns across
+# the Romanian news ecosystem. We flag them so the dashboard can show a
+# separate "multi-source only" suspicion ranking.
+SINGLE_SOURCE_TOP_DOMAIN_SHARE = 0.90
+SINGLE_SOURCE_MAX_DOMAIN_COUNT = 2
+
+# =========================================================================
 # TEXT COLUMN NAMES
 # =========================================================================
 COLUMNS_TO_CLEAN = [

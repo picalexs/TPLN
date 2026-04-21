@@ -18,6 +18,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -80,6 +81,9 @@ CLUSTER_SUMMARY_COLUMNS = [
     "burst_duration_days",
     "span_days",
     "suspicion_score",
+    "suspicion_score_multi_source",
+    "is_single_source",
+    "top_terms_joined",
     "representative_title",
 ]
 
@@ -99,6 +103,11 @@ EXTRA_TEMPORAL_COLUMNS = [
     "active_day_ratio",
     "top_domain_share",
     "timestamp_source_reliability",
+    "is_single_source",
+    "suspicion_score_multi_source",
+    "top_terms",
+    "top_terms_joined",
+    "representative_titles",
 ]
 
 PAGE_OPTIONS = [
@@ -426,9 +435,24 @@ if not temporal_df.empty:
     min_burst = st.sidebar.slider("Min burst score", 0, max(max_burst, 1), 0)
     max_susp = float(temporal_df["suspicion_score"].max()) if "suspicion_score" in temporal_df.columns and len(temporal_df) > 0 else 0.0
     min_suspicion = st.sidebar.slider("Min suspicion score", 0.0, max(max_susp, 0.0), 0.0, 0.5)
+    exclude_single_source = (
+        st.sidebar.checkbox(
+            "Exclude single-source clusters",
+            value=True,
+            help=(
+                "Drop clusters dominated by one domain "
+                "(top_domain_share >= 0.9 AND domain_count <= 2). "
+                "They are almost always scraper/aggregator artefacts "
+                "rather than multi-outlet coordinated campaigns."
+            ),
+        )
+        if "is_single_source" in temporal_df.columns
+        else False
+    )
 else:
     min_burst = 0
     min_suspicion = 0.0
+    exclude_single_source = False
 
 if dashboard_meta and pd.notna(dashboard_meta.get("min_timestamp")) and pd.notna(dashboard_meta.get("max_timestamp")):
     date_min = pd.Timestamp(dashboard_meta["min_timestamp"]).date()
@@ -483,6 +507,14 @@ if not filtered_temporal_df.empty and "suspicion_score" in filtered_temporal_df.
     filtered_temporal_df = filtered_temporal_df[
         filtered_temporal_df["suspicion_score"] >= float(min_suspicion)
     ].copy()
+
+single_source_removed = 0
+if exclude_single_source and "is_single_source" in filtered_temporal_df.columns:
+    before_rows = len(filtered_temporal_df)
+    filtered_temporal_df = filtered_temporal_df[
+        ~filtered_temporal_df["is_single_source"].fillna(False).astype(bool)
+    ].copy()
+    single_source_removed = before_rows - len(filtered_temporal_df)
 
 scatter_display_df = filter_sample_for_display(
     scatter_df=scatter_sample_df,
@@ -704,8 +736,20 @@ elif page == "Timeline and Bursts":
             | Peak / baseline | {f"{peak_ratio:.2f}" if pd.notna(peak_ratio) else "N/A"} |
             | Support / coverage weight | {f"{support_weight:.2f} / {coverage_weight:.2f}" if pd.notna(support_weight) and pd.notna(coverage_weight) else "N/A"} |
             | Source / domain weight | {f"{source_weight:.2f} / {domain_weight:.2f}" if pd.notna(source_weight) and pd.notna(domain_weight) else "N/A"} |
+            | Single-source cluster | {'Yes (top_domain >= 0.9)' if bool(row.get('is_single_source', False)) else 'No'} |
+            | Multi-source suspicion | {f"{row.get('suspicion_score_multi_source', 0):.1f}" if pd.notna(row.get('suspicion_score_multi_source')) else 'N/A'} |
+            | Top terms (c-TF-IDF) | {str(row.get('top_terms_joined', '')) or 'N/A'} |
             | Representative | {str(row.get('representative_title', ''))[:120]} |
             """)
+
+            rep_titles_raw = row.get("representative_titles", [])
+            if isinstance(rep_titles_raw, np.ndarray):
+                rep_titles_raw = rep_titles_raw.tolist()
+            rep_titles_list = [str(t) for t in rep_titles_raw or [] if str(t).strip()]
+            if rep_titles_list:
+                with st.expander("More representative titles", expanded=False):
+                    for rep_idx, rep_title in enumerate(rep_titles_list, start=1):
+                        st.markdown(f"{rep_idx}. {rep_title}")
 
         cluster_daily = load_daily_for_cluster(sel_cluster_id)
         if not cluster_daily.empty:
@@ -783,6 +827,11 @@ elif page == "Top Campaigns":
         "Clusters ranked by suspicion score - combining semantic cohesion, "
         "temporal burst strength, and cluster size."
     )
+    if exclude_single_source:
+        st.caption(
+            f"Single-source clusters excluded from this view: {single_source_removed}. "
+            "Toggle 'Exclude single-source clusters' in the sidebar to include them."
+        )
 
     if not filtered_temporal_df.empty:
         top_campaigns = filtered_temporal_df.head(15)
@@ -798,11 +847,14 @@ elif page == "Top Campaigns":
             first = camp.get("first_seen", "?")
             last = camp.get("last_seen", "?")
             rep = str(camp.get("representative_title", ""))[:150]
+            terms = str(camp.get("top_terms_joined", ""))
+            is_single_source_flag = bool(camp.get("is_single_source", False))
 
             severity = "HIGH" if score > 20 else "MEDIUM" if score > 10 else "LOW"
+            single_tag = " [SINGLE-SOURCE]" if is_single_source_flag else ""
 
             with st.expander(
-                f"[{severity}] #{rank} - Cluster {cid} ({topic}) - Score: {score:.1f}",
+                f"[{severity}] #{rank} - Cluster {cid} ({topic}){single_tag} - Score: {score:.1f}",
                 expanded=(rank <= 3),
             ):
                 ecol1, ecol2, ecol3 = st.columns(3)
@@ -810,6 +862,14 @@ elif page == "Top Campaigns":
                 ecol2.metric("Burst (D/W)", f"{burst_d}/{burst_w}")
                 ecol3.metric("Stable burst?", "Yes" if stable else "No")
 
+                if is_single_source_flag:
+                    st.warning(
+                        "Single-source cluster: dominated by one domain. "
+                        "Likely a scraper/aggregator artefact rather than a "
+                        "cross-outlet coordinated campaign."
+                    )
+                if terms:
+                    st.markdown(f"**Top terms (c-TF-IDF):** {terms}")
                 st.markdown(f"**Period:** {first} to {last}")
                 st.markdown(f"**Representative:** {rep}")
 

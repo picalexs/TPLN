@@ -17,11 +17,21 @@ import warnings
 from urllib.parse import urlparse
 import numpy as np
 import pandas as pd
+from sklearn.feature_extraction.text import TfidfVectorizer
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from src.config import (
+    CLUSTER_LABEL_TEXT_COLUMN,
+    CLUSTER_LABEL_TOP_TERMS,
+    CLUSTER_REPRESENTATIVE_TITLES,
+    SINGLE_SOURCE_MAX_DOMAIN_COUNT,
+    SINGLE_SOURCE_TOP_DOMAIN_SHARE,
+    TFIDF_MAX_FEATURES,
+    TFIDF_NGRAM,
+)
 from src.paths import CLUSTERED_PARQUET, TEMPORAL_DIR, TEMPORAL_STATS
 from src.io_utils import load_clean_data
 from src.runtime_profile import apply_runtime_profile, detect_runtime_profile, format_runtime_profile
@@ -98,7 +108,12 @@ TEMPORAL_STATS_COLUMNS = [
     "suspicion_score_raw",
     "suspicion_penalty_total",
     "suspicion_score",
+    "is_single_source",
+    "suspicion_score_multi_source",
+    "top_terms",
+    "top_terms_joined",
     "representative_title",
+    "representative_titles",
     "burst_score",
     "burst_duration_days",
     "article_count",
@@ -139,6 +154,128 @@ def _normalize_domain(url_value):
         domain = domain[4:]
 
     return domain or "unknown_domain"
+
+
+def _pick_cluster_label_text_column(df: pd.DataFrame) -> str:
+    """Return the first available text column for cluster labelling.
+
+    Prefers the already-stopword-filtered column (so c-TF-IDF doesn't
+    have to filter Romanian function words itself), falling back to
+    length-capped short documents, then to the raw document field.
+    """
+    for candidate in (CLUSTER_LABEL_TEXT_COLUMN, "short_document", "document", "text"):
+        if candidate in df.columns:
+            return candidate
+    raise KeyError(
+        "Clustered parquet is missing every candidate text column "
+        f"{(CLUSTER_LABEL_TEXT_COLUMN, 'short_document', 'document', 'text')}. "
+        "Re-run DataCuration.py to rebuild the text fields."
+    )
+
+
+def compute_cluster_cfidf_terms(
+    df_clustered: pd.DataFrame,
+    *,
+    text_column: str,
+    top_n: int,
+) -> dict[int, list[str]]:
+    """Return the top class-TF-IDF terms per real cluster.
+
+    We concatenate every article in a cluster into a single "class
+    document" and run a standard TF-IDF on the class documents. Terms
+    shared across all clusters get low IDF and self-suppress, leaving
+    each cluster with the vocabulary that actually distinguishes it.
+    This is the BERTopic formulation but implemented with sklearn so
+    we don't pull in a heavy dependency.
+    """
+    class_docs = (
+        df_clustered.groupby("cluster", sort=True)[text_column]
+        .apply(lambda s: " ".join(s.fillna("").astype(str).tolist()))
+    )
+    cluster_ids = class_docs.index.tolist()
+    if not cluster_ids:
+        return {}
+
+    vectorizer = TfidfVectorizer(
+        max_features=TFIDF_MAX_FEATURES,
+        ngram_range=TFIDF_NGRAM,
+        sublinear_tf=True,
+        lowercase=True,
+        # Keep tokens that are at least 3 letters long, skip pure digits.
+        token_pattern=r"(?u)\b[^\W\d_][^\W\d_]{2,}\b",
+    )
+    try:
+        matrix = vectorizer.fit_transform(class_docs.values)
+    except ValueError:
+        # Empty vocabulary (e.g. every cluster doc was empty). Fail
+        # gracefully by returning empty term lists.
+        return {int(cid): [] for cid in cluster_ids}
+
+    terms = np.asarray(vectorizer.get_feature_names_out())
+    top_terms_per_cluster: dict[int, list[str]] = {}
+    for row_idx, cluster_id in enumerate(cluster_ids):
+        row = matrix.getrow(row_idx).toarray().ravel()
+        if row.size == 0 or row.max() <= 0:
+            top_terms_per_cluster[int(cluster_id)] = []
+            continue
+        # argpartition is O(V) vs O(V log V) for full sort; we only need
+        # the top N indices, order matters for display only.
+        k = min(top_n, row.size)
+        top_idx = np.argpartition(row, -k)[-k:]
+        top_idx = top_idx[np.argsort(row[top_idx])[::-1]]
+        top_terms_per_cluster[int(cluster_id)] = [
+            str(terms[j]) for j in top_idx if row[j] > 0
+        ]
+    return top_terms_per_cluster
+
+
+def pick_representative_titles(
+    df_clustered: pd.DataFrame,
+    *,
+    top_n: int,
+) -> dict[int, list[str]]:
+    """Select the most cluster-core titles per cluster.
+
+    HDBSCAN's `cluster_membership_strength` column already ranks each
+    article by how central it is to its cluster (higher = closer to
+    the density core). We pick the top-`top_n` strongest titles,
+    deduplicating near-identical wire copies along the way.
+
+    Reassigned-from-noise and duplicate-of-clustered rows have NaN
+    strength; they're pushed to the back and used only as fillers when
+    a cluster is short on canonical members.
+    """
+    if "title" not in df_clustered.columns:
+        return {}
+
+    strength_col = "cluster_membership_strength"
+    if strength_col not in df_clustered.columns:
+        ranked = df_clustered.sort_values("cluster")
+    else:
+        ranked = df_clustered.sort_values(
+            ["cluster", strength_col],
+            ascending=[True, False],
+            na_position="last",
+        )
+
+    out: dict[int, list[str]] = {}
+    for cluster_id, group in ranked.groupby("cluster", sort=True):
+        titles = group["title"].fillna("").astype(str).tolist()
+        seen: set[str] = set()
+        picks: list[str] = []
+        for raw in titles:
+            clean = " ".join(raw.strip().split())
+            if not clean:
+                continue
+            key = clean.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            picks.append(clean[:200])
+            if len(picks) >= top_n:
+                break
+        out[int(cluster_id)] = picks
+    return out
 
 
 def _normalized_entropy(series):
@@ -368,6 +505,32 @@ def main() -> int:
     grouped_ts = df_ts.groupby("cluster", sort=True)
 
     # ---------------------------------------------------------------------------
+    # CLUSTER LABELS: class-TF-IDF top terms + representative titles
+    # Built once over the full clustered dataframe so every cluster gets
+    # terms whose IDF is computed against every other cluster, not just
+    # against timestamped ones. The `grouped_all` groups still drive the
+    # per-cluster temporal stats below.
+    # ---------------------------------------------------------------------------
+    label_text_column = _pick_cluster_label_text_column(clustered_df)
+    print(
+        f"\nComputing c-TF-IDF cluster labels from '{label_text_column}' "
+        f"({len(clustered_df):,} clustered rows)..."
+    )
+    cluster_label_terms = compute_cluster_cfidf_terms(
+        clustered_df,
+        text_column=label_text_column,
+        top_n=CLUSTER_LABEL_TOP_TERMS,
+    )
+    cluster_representative_titles = pick_representative_titles(
+        clustered_df,
+        top_n=CLUSTER_REPRESENTATIVE_TITLES,
+    )
+    print(
+        f"  Labels computed for {len(cluster_label_terms):,} clusters; "
+        f"representative titles for {len(cluster_representative_titles):,}."
+    )
+
+    # ---------------------------------------------------------------------------
     # COMPUTE STATS PER CLUSTER
     # ---------------------------------------------------------------------------
     print("\nComputing temporal stats per cluster...")
@@ -439,10 +602,17 @@ def main() -> int:
             mode = sub["topic_group"].mode()
             topic = mode.iloc[0] if not mode.empty else "unknown"
 
-        # Representative title — safe column check
-        rep_title = ""
-        if len(sub_all) > 0 and "title" in sub_all.columns:
-            rep_title = str(sub_all.iloc[0]["title"])[:200]
+        # Representative titles: best-membership articles per cluster,
+        # deduplicated against near-identical wire copies. Falls back to
+        # the first available title if HDBSCAN membership strength is
+        # missing (small topics, legacy parquet files).
+        rep_titles_list = cluster_representative_titles.get(int(cluster_id), [])
+        if not rep_titles_list and len(sub_all) > 0 and "title" in sub_all.columns:
+            rep_titles_list = [str(sub_all.iloc[0]["title"])[:200]]
+        rep_title = rep_titles_list[0] if rep_titles_list else ""
+
+        top_terms_list = cluster_label_terms.get(int(cluster_id), [])
+        top_terms_joined = ", ".join(top_terms_list[:5])
 
         # Concentration: timestamped articles / span_days
         concentration = article_count_ts / max(span_days, 1)
@@ -507,6 +677,17 @@ def main() -> int:
         )
         suspicion_score = round(suspicion_score, 3)
 
+        # Single-source flag: clusters dominated by a single domain are
+        # almost always scraper/aggregator artefacts rather than
+        # coordinated activity across Romanian outlets. Zero them out in
+        # the multi-source ranking so the dashboard can surface the
+        # genuinely cross-outlet suspicious stories separately.
+        is_single_source = bool(
+            top_domain_share >= SINGLE_SOURCE_TOP_DOMAIN_SHARE
+            and domain_count <= SINGLE_SOURCE_MAX_DOMAIN_COUNT
+        )
+        suspicion_score_multi_source = 0.0 if is_single_source else suspicion_score
+
         records.append({
             "cluster": cluster_id,
             "topic_group": topic,
@@ -555,7 +736,12 @@ def main() -> int:
             "suspicion_score_raw": round(suspicion_raw, 4),
             "suspicion_penalty_total": round(penalty_total + support_penalty, 4),
             "suspicion_score": suspicion_score,
+            "is_single_source": is_single_source,
+            "suspicion_score_multi_source": round(suspicion_score_multi_source, 3),
+            "top_terms": top_terms_list,
+            "top_terms_joined": top_terms_joined,
             "representative_title": rep_title,
+            "representative_titles": rep_titles_list,
         })
 
         if (i + 1) % 50 == 0:
@@ -575,27 +761,52 @@ def main() -> int:
     # REPORT
     # ---------------------------------------------------------------------------
     print("\n" + "=" * 60)
-    print("TEMPORAL STATS - TOP 20 MOST SUSPICIOUS CLUSTERS")
+    print("TOP 20 MOST SUSPICIOUS CLUSTERS (raw ranking, incl. single-source)")
     print("=" * 60)
     for _, row in stats_df.head(20).iterrows():
         title = str(row.get("representative_title", ""))[:60]
+        terms = str(row.get("top_terms_joined", ""))[:60]
+        single_tag = "*" if bool(row.get("is_single_source", False)) else " "
         print(
-            f"  Cluster {int(row['cluster']):4d} | {str(row['topic_group']):15s} "
-            f"| total={int(row['total_articles']):5d} | ts={int(row['timestamped_articles']):4d} "
-            f"| cov={row['timestamp_coverage_ratio']:.2f} | act={row['active_day_ratio']:.3f} "
-            f"| doms={int(row['domain_count']):2d} topdom={row['top_domain_share']:.2f} "
-            f"| src_rel={row['timestamp_source_reliability']:.2f} "
-            f"| burst_d={int(row['burst_score_daily'])} burst_w={int(row['burst_score_weekly'])} "
-            f"| peakx={row['peak_to_baseline_ratio']:.1f} "
-            f"| pen={row['suspicion_penalty_total']:.1f} "
-            f"| susp={row['suspicion_score']:.1f} | {title}"
+            f" {single_tag}Cluster {int(row['cluster']):4d} | {str(row['topic_group']):13s} "
+            f"| total={int(row['total_articles']):5d} | doms={int(row['domain_count']):2d} "
+            f"topdom={row['top_domain_share']:.2f} | burst_d={int(row['burst_score_daily'])} "
+            f"burst_w={int(row['burst_score_weekly'])} | susp={row['suspicion_score']:.1f} | "
+            f"terms=[{terms}] | {title}"
         )
+    print("  ('*' = single_source cluster, excluded from multi-source ranking)")
+
+    multi_source_df = stats_df[stats_df["suspicion_score_multi_source"] > 0].sort_values(
+        "suspicion_score_multi_source", ascending=False
+    )
+    print("\n" + "=" * 60)
+    print("TOP 10 MULTI-SOURCE SUSPICIOUS CLUSTERS (excluding single-source)")
+    print("=" * 60)
+    if multi_source_df.empty:
+        print("  (no multi-source clusters with positive suspicion)")
+    else:
+        for _, row in multi_source_df.head(10).iterrows():
+            title = str(row.get("representative_title", ""))[:60]
+            terms = str(row.get("top_terms_joined", ""))[:60]
+            print(
+                f"  Cluster {int(row['cluster']):4d} | {str(row['topic_group']):13s} "
+                f"| total={int(row['total_articles']):5d} | doms={int(row['domain_count']):2d} "
+                f"topdom={row['top_domain_share']:.2f} | "
+                f"susp_ms={row['suspicion_score_multi_source']:.1f} | "
+                f"terms=[{terms}] | {title}"
+            )
 
     print(f"\nTotal clusters analyzed:        {len(stats_df)}")
     print(f"Clusters with daily burst > 0:  {(stats_df['burst_score_daily'] > 0).sum()}")
     print(f"Clusters with weekly burst > 0: {(stats_df['burst_score_weekly'] > 0).sum()}")
     print(f"Clusters stable (both):         {stats_df['burst_stable'].sum()}")
+    single_src_count = int(stats_df['is_single_source'].sum())
+    print(
+        f"Single-source clusters:         {single_src_count} "
+        f"({100 * single_src_count / max(len(stats_df), 1):.1f}% of total)"
+    )
     print(f"Max suspicion score:            {stats_df['suspicion_score'].max()}")
+    print(f"Max multi-source suspicion:     {stats_df['suspicion_score_multi_source'].max()}")
     print(f"Median active day ratio:        {stats_df['active_day_ratio'].median():.4f}")
     print(f"Median source reliability:      {stats_df['timestamp_source_reliability'].median():.4f}")
 
