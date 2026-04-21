@@ -107,7 +107,15 @@ def load_input_data(nrows: int | None = None) -> pd.DataFrame:
             "Run scripts/DataCuration.py first."
         )
 
-    load_columns = [col for col in COLUMNS_TO_PRESERVE if col in {"title", "topics", "short_document", "document"}]
+    # `document_nostop` is optional at the clean-data layer but strongly
+    # preferred downstream by TemporalAnalysis for c-TF-IDF cluster
+    # labels. Pulling it through here costs one extra column in the
+    # clustered parquet and avoids a silent fallback to `short_document`
+    # (which still contains Romanian stopwords).
+    load_columns = [
+        col for col in COLUMNS_TO_PRESERVE
+        if col in {"title", "topics", "short_document", "document", "document_nostop"}
+    ]
     df = load_clean_data(nrows=nrows, columns=load_columns)
 
     print("Shape initial:", df.shape)
@@ -410,31 +418,54 @@ def maybe_export_knn(
 ) -> None:
     if k < 1:
         return
-    _, _, knn_path = _faiss_paths(topic_name)
-    q = np.asarray(embeddings, dtype=np.float32)
-    distances, indices = cast(Any, index).search(q, k + 1)
 
-    records: list[dict[str, Any]] = []
-    for source_idx in range(len(q)):
-        rank = 0
-        for neighbor_idx, score in zip(indices[source_idx], distances[source_idx]):
-            if int(neighbor_idx) == int(source_idx) or int(neighbor_idx) < 0:
-                continue
-            rank += 1
-            if rank > k:
-                break
-            records.append(
-                {
-                    "topic_group": topic_name,
-                    "source_idx": int(source_idx),
-                    "neighbor_idx": int(neighbor_idx),
-                    "rank": int(rank),
-                    "score": float(score),
-                }
-            )
+    # For IVF-Flat indexes, temporarily raise nprobe to nlist so the
+    # exported neighbor list is effectively exhaustive. The dashboard
+    # surfaces these rows directly as "Semantic Neighbor Evidence";
+    # approximate recall at the default nprobe creates confusing,
+    # non-reproducible evidence tables. Restore the original nprobe
+    # afterwards so any later queries on the same handle keep their
+    # lower-latency profile.
+    original_nprobe: int | None = None
+    try:
+        if hasattr(index, "nprobe") and hasattr(index, "nlist"):
+            original_nprobe = int(cast(Any, index).nprobe)
+            cast(Any, index).nprobe = int(cast(Any, index).nlist)
+    except Exception:
+        original_nprobe = None
 
-    pd.DataFrame(records).to_parquet(knn_path, index=False)
-    print(f"Persisted FAISS kNN edges: {knn_path} ({len(records):,} rows)")
+    try:
+        _, _, knn_path = _faiss_paths(topic_name)
+        q = np.asarray(embeddings, dtype=np.float32)
+        distances, indices = cast(Any, index).search(q, k + 1)
+
+        records: list[dict[str, Any]] = []
+        for source_idx in range(len(q)):
+            rank = 0
+            for neighbor_idx, score in zip(indices[source_idx], distances[source_idx]):
+                if int(neighbor_idx) == int(source_idx) or int(neighbor_idx) < 0:
+                    continue
+                rank += 1
+                if rank > k:
+                    break
+                records.append(
+                    {
+                        "topic_group": topic_name,
+                        "source_idx": int(source_idx),
+                        "neighbor_idx": int(neighbor_idx),
+                        "rank": int(rank),
+                        "score": float(score),
+                    }
+                )
+
+        pd.DataFrame(records).to_parquet(knn_path, index=False)
+        print(f"Persisted FAISS kNN edges: {knn_path} ({len(records):,} rows)")
+    finally:
+        if original_nprobe is not None:
+            try:
+                cast(Any, index).nprobe = original_nprobe
+            except Exception:
+                pass
 
 
 def _build_flat_faiss_index(embeddings: np.ndarray) -> faiss.Index:
@@ -504,6 +535,7 @@ def reassign_noise_via_knn(
     labels: np.ndarray,
     embeddings: np.ndarray,
     faiss_index: faiss.Index,
+    canonical_of: np.ndarray,
     *,
     k: int,
     min_agreement: float,
@@ -518,15 +550,30 @@ def reassign_noise_via_knn(
     HDBSCAN's soft-clustering reassignment, but uses the FAISS index
     the pipeline already builds so it stays fast on 100k-article topics.
 
+    Votes are collapsed to one per canonical: Romanian wire syndication
+    produces many near-identical copies that all carry the same label,
+    and letting each copy vote independently causes the agreement
+    threshold to be met trivially by whichever cluster happens to have
+    the most syndicators near the noise point, rather than by the
+    cluster with the most distinct neighbors.
+
     Returns ``(new_labels, reassigned_mask)`` where ``reassigned_mask[i]``
     is ``True`` iff row ``i`` was promoted from noise to a cluster.
     """
     labels = np.asarray(labels)
+    canonical_of = np.asarray(canonical_of, dtype=np.int64)
     noise_idx = np.where(labels == -1)[0]
     if len(noise_idx) == 0:
         return labels, np.zeros(len(labels), dtype=bool)
 
-    search_k = k + 1  # +1 for the self-match
+    # Over-sample the neighbor list so that, after collapsing votes by
+    # canonical, we still reach ``k`` distinct-canonical votes in the
+    # common case. A syndicated story can produce >10 consecutive
+    # duplicates in the sorted neighbor list; stopping at ``k + 1`` would
+    # leave us with only a handful of distinct votes and distort the
+    # agreement check.
+    index_total = int(cast(Any, faiss_index).ntotal)
+    search_k = min(max(k * 3 + 1, k + 1), max(index_total, 1))
     queries = np.asarray(embeddings[noise_idx], dtype=np.float32)
     _, neighbors = cast(Any, faiss_index).search(queries, search_k)
 
@@ -534,10 +581,15 @@ def reassign_noise_via_knn(
     reassigned = np.zeros(len(labels), dtype=bool)
     for local_i, global_i in enumerate(noise_idx):
         neighbor_labels: list[int] = []
+        seen_canonicals: set[int] = set()
         for nb in neighbors[local_i]:
             nb = int(nb)
             if nb < 0 or nb == int(global_i):
                 continue
+            canonical_root = int(canonical_of[nb])
+            if canonical_root in seen_canonicals:
+                continue
+            seen_canonicals.add(canonical_root)
             lab = int(labels[nb])
             if lab == -1:
                 continue
@@ -881,14 +933,24 @@ def evaluate_topic_configs(
     return best_result, topic_results
 
 
-def to_results_rows(topic_name: str, topic_size: int, topic_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def to_results_rows(
+    topic_name: str,
+    topic_size: int,
+    canonical_size: int,
+    topic_results: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for result in topic_results:
         cfg = result["cfg"]
         rows.append(
             {
                 "topic_group": topic_name,
+                # ``topic_size`` is the true number of articles in the
+                # topic; ``canonical_size`` is how many unique canonicals
+                # remained after near-duplicate collapse, which is what
+                # HDBSCAN actually clustered.
                 "topic_size": topic_size,
+                "canonical_size": canonical_size,
                 "min_cluster_size": cfg["min_cluster_size"],
                 "min_samples": cfg["min_samples"],
                 "cluster_selection_method": cfg.get("cluster_selection_method", "eom"),
@@ -998,14 +1060,21 @@ def process_topic(
 
     n_total = int(len(df_topic))
 
-    # --- FAISS: build or reuse. Always keep a handle around because the
-    #     dedup and noise-reassignment steps need a nearest-neighbor
-    #     backend even when persistence is disabled via --disable-faiss.
+    # Exact flat cosine index. Dedup, noise reassignment, and debug
+    # neighbor inspection all route through this handle: they must be
+    # deterministic and must return true top-k neighbors. An IVF-Flat
+    # index with a fractional nprobe silently misses near-duplicates
+    # that land in unprobed cells, causing run-to-run drift in the
+    # canonical mapping and biased noise-reassignment votes.
+    faiss_index: faiss.Index = _build_flat_faiss_index(embeddings)
+
     faiss_seconds = 0.0
-    faiss_index: faiss.Index | None = None
     if faiss_enabled:
         faiss_start = perf_counter()
-        faiss_index, faiss_meta, created = get_or_create_faiss_index(
+        # Persistent index is only used by the kNN export below. Its
+        # IVF-Flat variant is cheaper for the one-shot export query and
+        # is the on-disk cache re-read on subsequent runs.
+        persistent_index, faiss_meta, created = get_or_create_faiss_index(
             topic_name=topic_name,
             embeddings=embeddings,
             documents=documents,
@@ -1016,24 +1085,20 @@ def process_topic(
         )
         print(
             "FAISS ready: "
-            f"type={faiss_meta.get('index_type')} vectors={int(faiss_index.ntotal)} "
+            f"type={faiss_meta.get('index_type')} vectors={int(persistent_index.ntotal)} "
             f"created_now={'yes' if created else 'no'}"
         )
         if faiss_write_knn:
             maybe_export_knn(
                 topic_name=topic_name,
-                index=faiss_index,
+                index=persistent_index,
                 embeddings=embeddings,
                 k=faiss_knn_k,
             )
-        if debug_neighbors:
-            print_neighbor_examples(faiss_index, embeddings, df_topic)
         faiss_seconds = perf_counter() - faiss_start
-    else:
-        print("  Building in-memory FAISS index for dedup and noise reassignment...")
-        faiss_index = _build_flat_faiss_index(embeddings)
-        if debug_neighbors:
-            print_neighbor_examples(faiss_index, embeddings, df_topic)
+
+    if debug_neighbors:
+        print_neighbor_examples(faiss_index, embeddings, df_topic)
 
     # --- Near-duplicate detection: reduce to canonical embeddings so
     #     UMAP doesn't see cosine ~1.0 point collisions from syndicated
@@ -1125,6 +1190,7 @@ def process_topic(
         full_labels,
         embeddings,
         faiss_index,
+        canonical_of,
         k=NOISE_REASSIGN_K,
         min_agreement=NOISE_REASSIGN_MIN_AGREEMENT,
     )
@@ -1191,7 +1257,7 @@ def process_topic(
         "topic_total_seconds": round(topic_total_seconds, 4),
         "rows_per_second": round(n_total / max(topic_total_seconds, 1e-6), 4),
     }
-    return labelled_topic, to_results_rows(topic_name, n_canonical, topic_results), next_offset, timing_row
+    return labelled_topic, to_results_rows(topic_name, n_total, n_canonical, topic_results), next_offset, timing_row
 
 
 def build_small_topics_noise(df: pd.DataFrame, eligible_topics: list[str]) -> pd.DataFrame:

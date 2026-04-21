@@ -431,9 +431,19 @@ min_cluster_size = st.sidebar.slider("Min cluster size", 1, max(max_cluster_size
 
 if not temporal_df.empty:
     burst_col = "burst_score" if "burst_score" in temporal_df.columns else "burst_score_daily"
-    max_burst = int(temporal_df[burst_col].max()) if len(temporal_df) > 0 else 1
+    # Coerce to numeric before computing max: on corpora where every
+    # cluster lacks a valid burst/suspicion value the column is all-NaN,
+    # `.max()` returns NaN, and Streamlit's slider rejects NaN bounds.
+    burst_series = pd.to_numeric(temporal_df[burst_col], errors="coerce")
+    max_burst_value = burst_series.max()
+    max_burst = int(max_burst_value) if pd.notna(max_burst_value) else 1
     min_burst = st.sidebar.slider("Min burst score", 0, max(max_burst, 1), 0)
-    max_susp = float(temporal_df["suspicion_score"].max()) if "suspicion_score" in temporal_df.columns and len(temporal_df) > 0 else 0.0
+    if "suspicion_score" in temporal_df.columns:
+        susp_series = pd.to_numeric(temporal_df["suspicion_score"], errors="coerce")
+        max_susp_value = susp_series.max()
+        max_susp = float(max_susp_value) if pd.notna(max_susp_value) else 0.0
+    else:
+        max_susp = 0.0
     min_suspicion = st.sidebar.slider("Min suspicion score", 0.0, max(max_susp, 0.0), 0.0, 0.5)
     exclude_single_source = (
         st.sidebar.checkbox(

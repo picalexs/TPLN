@@ -350,51 +350,13 @@ def kleinberg_burst(event_times, s=2.0, gamma=1.0, freq="D"):
     # Fixed freq strings: '7D' for weekly, 'D' for daily.
     rng_freq = "7D" if freq == "W" else "D"
 
-    # Try library first
-    try:
-        import burst_detection as bd  # type: ignore[import-not-found]
-        dates = event_times.sort_values()
-        if freq == "W":
-            floored = dates.dt.to_period("W-MON").apply(lambda p: p.start_time)
-        else:
-            floored = dates.dt.floor("D")
-        full_index = pd.date_range(floored.min(), floored.max(), freq=rng_freq)
-        counts = floored.value_counts().sort_index().reindex(full_index, fill_value=0)
-        r = counts.values.astype(float)
-        n = len(r)
-        d = len(full_index)
-
-        if n < 2 or d < 2:
-            return 0, []
-
-        q = bd.burst_detection(r, d, s=s, gamma=gamma)
-        level_max = int(np.max(q)) if len(q) > 0 else 0
-
-        periods = []
-        in_burst = False
-        burst_start = None
-        burst_level = 0
-        for i, lv in enumerate(q):
-            if i >= len(full_index):
-                break
-            date = full_index[i]
-            if lv >= 1 and not in_burst:
-                in_burst = True
-                burst_start = date
-                burst_level = int(lv)
-            elif lv >= 1 and in_burst:
-                burst_level = max(burst_level, int(lv))
-            elif lv < 1 and in_burst:
-                periods.append((burst_start, full_index[i - 1], burst_level))
-                in_burst = False
-        if in_burst:
-            periods.append((burst_start, full_index[min(len(q), len(full_index)) - 1], burst_level))
-
-        return level_max, periods
-    except (ImportError, Exception):
-        pass
-
-    # Manual Kleinberg (two-state)
+    # Two-state Kleinberg implemented inline. We deliberately do not
+    # fall back to the PyPI `burst_detection` package: its public API
+    # is `burst_detection(r, d, n, s, gamma, smooth_win)` and it
+    # returns a tuple rather than a state vector, so every call site
+    # in that earlier integration raised silently and this manual
+    # implementation ran anyway. Keeping one code path avoids the
+    # deceptive appearance of a library-backed detector.
     dates = event_times.sort_values()
 
     if freq == "W":
