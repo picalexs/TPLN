@@ -16,6 +16,31 @@ Start here:
 - [Environment template](.env.example) - Hugging Face token placeholder for the
   first data download.
 
+## Dashboard Preview
+
+The Streamlit dashboard is a dark-mode evidence browser for moving from corpus
+overview to cluster-level articles. It can inspect topic coverage, semantic
+cluster structure, temporal bursts, ranked campaign candidates, similarity
+links, and quality/runtime diagnostics.
+
+<!--markdownlint-disable MD033-->
+<table>
+  <tr>
+    <td><img src="docs/images/dashboard-cluster-explorer.png" alt="Cluster explorer with topic counts, timestamp coverage, and UMAP projection"></td>
+    <td><img src="docs/images/dashboard-timeline-bursts.png" alt="Timeline and burst view with active publication days"></td>
+  </tr>
+  <tr>
+    <td><img src="docs/images/dashboard-top-campaigns.png" alt="Top campaign candidates with score components and storyline controls"></td>
+    <td><img src="docs/images/dashboard-similarity-map.png" alt="Cross-cluster similarity map and edge diagnostics"></td>
+  </tr>
+</table>
+<!--markdownlint-enable MD033-->
+
+Additional diagnostic views:
+[topic health](docs/images/dashboard-topic-health.png),
+[runtime observability](docs/images/dashboard-runtime-observability.png), and
+[evaluation/config sweep](docs/images/dashboard-evaluation-config.png).
+
 ## What The Pipeline Does
 
 ```mermaid
