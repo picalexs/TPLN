@@ -27,7 +27,7 @@ def main() -> None:
     pivot = pivot[order_cols]
     pivot = pivot.loc[pivot["url"].sort_values(ascending=True).index]
 
-    fig, ax = plt.subplots(figsize=(8, 5))
+    fig, ax = plt.subplots(figsize=(8.8, 5.4))
     bottom = pd.Series(0.0, index=pivot.index)
     color_map = {"url": OKABE_ITO[0], "htmldate": OKABE_ITO[2],
                  "text": OKABE_ITO[1], "missing": "#bbbbbb"}
@@ -39,7 +39,13 @@ def main() -> None:
     ax.set_xlim(0, 1)
     ax.set_xlabel("Share of articles")
     ax.set_title("Timestamp provenance by topic")
-    ax.legend(loc="lower right", ncols=4)
+    ax.legend(
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.14),
+        ncols=4,
+        frameon=False,
+    )
+    fig.subplots_adjust(bottom=0.22)
     save(fig, "A2_timestamp_source_breakdown")
 
 

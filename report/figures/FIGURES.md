@@ -166,27 +166,17 @@ restriction, certificate, and controversy narratives are still allowed.
 **Use as:** the headline candidate figure, with the caveat that these are
 ranked candidates rather than verified coordinated campaigns.
 
-### D13 — Daily timelines of the top compact campaign candidates
+### D13 — Daily timelines of the top non-COVID compact campaign candidates
 
 **Source:** `data/dashboard/cluster_daily_counts.parquet` and
 `data/temporal/cluster_temporal_stats.parquet`. Three stacked panels showing the
-daily article counts for the top-3 clusters by `campaign_candidate_score`. Each
-title shows both the campaign-candidate score and the underlying suspicion
-score, making it clear that the final case-study ranking is stricter than the
-generic burst ranking. The plot uses daily bars rather than a filled line so
-sparse publication dates are not visually connected across long gaps.
-**Use as:** qualitative case study right after D12.
-
-### D14 — Daily vs. weekly burst score
-
-**Source:** `data/temporal/cluster_temporal_stats.parquet`. Scatter of
-`burst_score_daily` vs `burst_score_weekly` with `burst_stable = True` clusters
-highlighted (4 841 out of 6 813 clusters are burst-stable). Clusters in the
-upper-right are bursty on both granularities (genuinely concentrated); points
-only on the daily axis are short-lived spikes that dissolve over a week. The two
-measures disagree often enough that having both is not redundant.
-**Use as:** evidence that daily and weekly burst scoring capture different
-phenomena.
+daily article counts for the top-3 **non-COVID** clusters by
+`campaign_candidate_score`. Each title shows both the campaign-candidate score
+and the underlying suspicion score. The plot uses daily bars rather than a
+filled line so sparse publication dates are not visually connected across long
+gaps.
+**Use as:** qualitative case study showing that the pipeline also surfaces
+non-COVID compact narratives.
 
 ### D15 — Suspicion and campaign-candidate score breakdown
 
@@ -204,6 +194,20 @@ small organic incidents and multi-year semantic themes can still have high burst
 suspicion, but their campaign candidate score collapses when the
 support/recurrence/span/narrative filters are applied. **Use as:** the concrete
 explanation of the stricter headline ranking.
+
+### D16 — Campaign candidate narrative types
+
+**Source:** `data/temporal/cluster_temporal_stats.parquet`. Two-panel summary of
+all compact campaign candidates grouped by heuristic narrative type. The left
+panel counts candidates by type; the right panel sums `campaign_candidate_score`
+by the same type and annotates the highest-scoring example in each bucket. Main
+buckets include COVID/vaccination, Ukraine/Russia war, energy/economy,
+governance/elections, justice/corruption, security/propaganda, travel/mobility,
+public-health non-COVID, and an explicit "Other / mixed public narratives"
+bucket for titles that do not match the simple keyword rules.
+**Use as:** high-level characterization of what kinds of narratives the
+candidate ranking surfaces, while being transparent that these type labels are
+heuristic.
 
 ---
 

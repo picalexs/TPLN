@@ -1,12 +1,14 @@
-"""Figure D13 - Daily timelines of top compact campaign candidates.
+"""Figure D13 - Daily timelines of top non-COVID compact campaign candidates.
 
 Shows the daily article-count timeline for the top clusters by
 ``campaign_candidate_score`` so the burst pattern remains visible while the
-case studies avoid obvious organic event clusters.
+case studies avoid COVID dominating the examples.
 """
 from __future__ import annotations
 
+import re
 import sys
+import unicodedata
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -19,6 +21,32 @@ sys.path.insert(0, str(ROOT))
 from src.campaign_scoring import add_campaign_candidate_columns
 
 N_PANELS = 3
+COVID_MARKERS = (
+    "covid",
+    "coronavirus",
+    "vaccin",
+    "anticovid",
+    "carantin",
+    "pcr",
+    "pandemie",
+    "imuniz",
+    "certificat covid",
+    "certificat verde",
+)
+
+
+def _normalize(value: object) -> str:
+    text = "" if value is None else str(value).lower()
+    text = "".join(
+        ch for ch in unicodedata.normalize("NFKD", text)
+        if not unicodedata.combining(ch)
+    )
+    return re.sub(r"[^a-z0-9]+", " ", text).strip()
+
+
+def _is_covid_candidate(title: object) -> bool:
+    text = _normalize(title)
+    return any(marker in text for marker in COVID_MARKERS)
 
 
 def main() -> None:
@@ -27,6 +55,7 @@ def main() -> None:
     if "campaign_candidate_score" not in ts.columns:
         ts = add_campaign_candidate_columns(ts)
     ts["score"] = ts["campaign_candidate_score"]
+    ts = ts[(ts["score"] > 0) & ~ts["representative_title"].map(_is_covid_candidate)]
     daily = pd.read_parquet(DASH / "cluster_daily_counts.parquet")
     daily["date"] = pd.to_datetime(daily["date"])
 
@@ -51,7 +80,7 @@ def main() -> None:
         )
         ax.set_title(title, fontsize=9.5, loc="left")
     axes[-1].set_xlabel("Date")
-    fig.suptitle("Daily timelines of top compact campaign candidates", y=1.0)
+    fig.suptitle("Daily timelines of top non-COVID compact campaign candidates", y=1.0)
     fig.tight_layout(rect=(0, 0, 1, 0.985))
     save(fig, "D13_top_cluster_timelines")
 

@@ -23,7 +23,7 @@ def main() -> None:
     cols = 2
     rows = (len(topics) + cols - 1) // cols
 
-    fig, axes = plt.subplots(rows, cols, figsize=(10, 3.6 * rows))
+    fig, axes = plt.subplots(rows, cols, figsize=(11.5, 4.1 * rows))
     axes = axes.flatten()
 
     vmin = float(df["silhouette"].min())
@@ -36,11 +36,11 @@ def main() -> None:
         im = ax.imshow(pivot.values, cmap="viridis", vmin=vmin, vmax=vmax,
                        aspect="auto")
         ax.set_xticks(range(len(pivot.columns)))
-        ax.set_xticklabels(pivot.columns)
+        ax.set_xticklabels(pivot.columns, rotation=30, ha="right")
         ax.set_yticks(range(len(pivot.index)))
         ax.set_yticklabels(pivot.index)
-        ax.set_xlabel("min_cluster_size")
-        ax.set_ylabel("min_samples")
+        ax.set_xlabel("min_cluster_size", labelpad=8)
+        ax.set_ylabel("min_samples", labelpad=8)
         ax.set_title(topic_label(t))
         ax.grid(False)
         for i in range(pivot.shape[0]):
@@ -49,11 +49,13 @@ def main() -> None:
                 if not np.isnan(v):
                     ax.text(j, i, f"{v:.3f}", ha="center", va="center",
                             color="white" if v < (vmin + vmax) / 2 else "black",
-                            fontsize=8)
+                            fontsize=7)
     for ax in axes[len(topics):]:
         ax.set_visible(False)
-    fig.colorbar(im, ax=axes[: len(topics)], shrink=0.8, label="Silhouette")
-    fig.suptitle("HDBSCAN silhouette across hyperparameter sweep")
+    fig.subplots_adjust(left=0.08, right=0.88, top=0.95, bottom=0.06, hspace=0.42, wspace=0.28)
+    cbar_ax = fig.add_axes([0.91, 0.16, 0.018, 0.70])
+    fig.colorbar(im, cax=cbar_ax, label="Silhouette")
+    fig.suptitle("HDBSCAN silhouette across hyperparameter sweep", y=0.985)
     save(fig, "C10_hdbscan_silhouette_heatmap")
 
 
