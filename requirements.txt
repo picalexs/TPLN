@@ -26,6 +26,7 @@ requests==2.32.3
 tqdm==4.67.1
 newspaper3k==0.2.8
 lxml_html_clean==0.4.4
+htmldate>=1.9.0
 
 # Optional burst-detection library is not required because scripts/TemporalAnalysis.py
 # includes a manual fallback implementation.

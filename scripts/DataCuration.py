@@ -10,13 +10,14 @@ from __future__ import annotations
 
 import argparse
 import os
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 import sys
 from pathlib import Path
 from typing import cast
 from urllib.parse import urlparse
 
 import pandas as pd
+from tqdm import tqdm
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -35,6 +36,7 @@ from src.config import (
     TIMESTAMP_QUALITY_MEDIUM,
     TIMESTAMP_QUALITY_MISSING,
     TIMESTAMP_QUALITY_REJECTED_FUTURE,
+    TIMESTAMP_SOURCE_HTMDATE,
     TIMESTAMP_SOURCE_COLUMN,
     TIMESTAMP_SOURCE_MISSING,
     TIMESTAMP_SOURCE_TEXT,
@@ -76,6 +78,16 @@ def _extract_domain_from_url(url: str) -> str:
 def _clean_stopword_chunk(values: list[str]) -> list[str]:
     """Worker-safe chunk transform for stopword removal."""
     return [remove_stopwords_and_clean(value) for value in values]
+
+
+def _fetch_htmldate(url: str):
+    """Worker-safe helper that extracts a publication date with htmldate."""
+    try:
+        from htmldate import find_date
+
+        return find_date(url, extensive_search=False)
+    except Exception:
+        return None
 
 
 def build_document_nostop(series: pd.Series, cpu_threads: int) -> pd.Series:
@@ -144,7 +156,7 @@ def clean_base_columns(train_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def attach_timestamps(train_df: pd.DataFrame) -> pd.DataFrame:
-    """Extract timestamps from URLs first, then from article text."""
+    """Extract timestamps from URLs, then text, then htmldate fallback."""
     train_df = train_df.copy()
     print("\nExtracting timestamps...")
 
@@ -164,12 +176,64 @@ def attach_timestamps(train_df: pd.DataFrame) -> pd.DataFrame:
     missing_mask = train_df["timestamp"].isna()
     if int(missing_mask.sum()) > 0:
         print(f"  Scanning text body for {int(missing_mask.sum()):,} remaining rows...")
-        text_dates = cast(pd.Series, train_df.loc[missing_mask, "text"]).apply(extract_date_from_text)
-        train_df.loc[missing_mask, "timestamp"] = pd.to_datetime(text_dates, errors="coerce")
+        text_dates = cast(pd.Series, train_df.loc[missing_mask, "text"]).apply(
+            extract_date_from_text
+        )
+        train_df.loc[missing_mask, "timestamp"] = pd.to_datetime(
+            text_dates, errors="coerce"
+        )
         text_found_mask = text_dates.notna()
-        train_df.loc[text_dates.index[text_found_mask], TIMESTAMP_SOURCE_COLUMN] = TIMESTAMP_SOURCE_TEXT
+        train_df.loc[text_dates.index[text_found_mask], TIMESTAMP_SOURCE_COLUMN] = (
+            TIMESTAMP_SOURCE_TEXT
+        )
         text_found = int(text_found_mask.sum())
         print(f"  From text: {text_found:,} ({100 * text_found / len(train_df):.1f}%)")
+
+    htmldate_mask = train_df["timestamp"].isna() & train_df["url"].notna()
+    htmldate_rows = int(htmldate_mask.sum())
+    if htmldate_rows > 0:
+        print(f"  Fallback via htmldate for {htmldate_rows:,} remaining rows...")
+        urls = train_df.loc[htmldate_mask, "url"].astype(str).tolist()
+        workers = max(1, min(8, len(urls)))
+        results: list[object] = [None] * len(urls)
+        successes = 0
+
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            future_to_idx = {
+                executor.submit(_fetch_htmldate, url): index
+                for index, url in enumerate(urls)
+            }
+            progress_bar = tqdm(total=len(urls), desc="htmldate")
+
+            for future in as_completed(future_to_idx):
+                index = future_to_idx[future]
+                try:
+                    result = future.result()
+                    if result:
+                        successes += 1
+                    results[index] = result
+                except Exception:
+                    results[index] = None
+                progress_bar.update(1)
+                rate = (successes / progress_bar.n) * 100
+                progress_bar.set_description(f"htmldate {rate:.1f}%")
+
+            progress_bar.close()
+
+        htmldate_index = train_df.loc[htmldate_mask].index
+        htmldate_series = pd.to_datetime(
+            pd.Series(results, index=htmldate_index), errors="coerce"
+        )
+        htmldate_found = htmldate_series.notna()
+        train_df.loc[htmldate_series.index[htmldate_found], "timestamp"] = htmldate_series[
+            htmldate_found
+        ]
+        train_df.loc[
+            htmldate_series.index[htmldate_found], TIMESTAMP_SOURCE_COLUMN
+        ] = TIMESTAMP_SOURCE_HTMDATE
+        print(
+            f"  From htmldate: {int(htmldate_found.sum()):,} ({100 * int(htmldate_found.sum()) / len(train_df):.1f}%)"
+        )
 
     train_df[TIMESTAMP_SOURCE_COLUMN] = (
         train_df[TIMESTAMP_SOURCE_COLUMN]
@@ -212,6 +276,7 @@ def validate_timestamp_quality(train_df: pd.DataFrame) -> pd.DataFrame:
     quality.loc[rejected_mask] = TIMESTAMP_QUALITY_REJECTED_FUTURE
 
     url_mask = timestamps.notna() & (sources == TIMESTAMP_SOURCE_URL)
+    htmldate_mask = timestamps.notna() & (sources == TIMESTAMP_SOURCE_HTMDATE)
     text_low_mask = (
         timestamps.notna()
         & (sources == TIMESTAMP_SOURCE_TEXT)
@@ -220,6 +285,7 @@ def validate_timestamp_quality(train_df: pd.DataFrame) -> pd.DataFrame:
     text_medium_mask = timestamps.notna() & (sources == TIMESTAMP_SOURCE_TEXT) & ~text_low_mask
 
     quality.loc[url_mask] = TIMESTAMP_QUALITY_HIGH
+    quality.loc[htmldate_mask] = TIMESTAMP_QUALITY_HIGH
     quality.loc[text_low_mask] = TIMESTAMP_QUALITY_LOW
     quality.loc[text_medium_mask] = TIMESTAMP_QUALITY_MEDIUM
 
@@ -231,7 +297,12 @@ def validate_timestamp_quality(train_df: pd.DataFrame) -> pd.DataFrame:
         train_df[TIMESTAMP_SOURCE_COLUMN]
         .value_counts()
         .reindex(
-            [TIMESTAMP_SOURCE_URL, TIMESTAMP_SOURCE_TEXT, TIMESTAMP_SOURCE_MISSING],
+            [
+                TIMESTAMP_SOURCE_URL,
+                TIMESTAMP_SOURCE_TEXT,
+                TIMESTAMP_SOURCE_HTMDATE,
+                TIMESTAMP_SOURCE_MISSING,
+            ],
             fill_value=0,
         )
     )
@@ -263,9 +334,22 @@ def print_domain_report(train_df: pd.DataFrame) -> None:
         .agg(
             rows=("domain", "size"),
             timestamped=("timestamp", lambda s: int(s.notna().sum())),
-            url_source=(TIMESTAMP_SOURCE_COLUMN, lambda s: int((s == TIMESTAMP_SOURCE_URL).sum())),
-            text_source=(TIMESTAMP_SOURCE_COLUMN, lambda s: int((s == TIMESTAMP_SOURCE_TEXT).sum())),
-            missing_source=(TIMESTAMP_SOURCE_COLUMN, lambda s: int((s == TIMESTAMP_SOURCE_MISSING).sum())),
+            url_source=(
+                TIMESTAMP_SOURCE_COLUMN,
+                lambda s: int((s == TIMESTAMP_SOURCE_URL).sum()),
+            ),
+            text_source=(
+                TIMESTAMP_SOURCE_COLUMN,
+                lambda s: int((s == TIMESTAMP_SOURCE_TEXT).sum()),
+            ),
+            htmldate_source=(
+                TIMESTAMP_SOURCE_COLUMN,
+                lambda s: int((s == TIMESTAMP_SOURCE_HTMDATE).sum()),
+            ),
+            missing_source=(
+                TIMESTAMP_SOURCE_COLUMN,
+                lambda s: int((s == TIMESTAMP_SOURCE_MISSING).sum()),
+            ),
         )
         .sort_values(["rows", "timestamped"], ascending=[False, False])
     )
@@ -274,7 +358,15 @@ def print_domain_report(train_df: pd.DataFrame) -> None:
     print("\nTop domains by volume:")
     print(
         domain_summary.head(TIMESTAMP_DOMAIN_REPORT_TOP_N)[
-            ["rows", "timestamped", "coverage_pct", "url_source", "text_source", "missing_source"]
+            [
+                "rows",
+                "timestamped",
+                "coverage_pct",
+                "url_source",
+                "text_source",
+                "htmldate_source",
+                "missing_source",
+            ]
         ].to_string(float_format=lambda value: f"{value:.1f}")
     )
 
@@ -287,7 +379,15 @@ def print_domain_report(train_df: pd.DataFrame) -> None:
     print(f"\nWeakest domains with at least {TIMESTAMP_DOMAIN_MIN_ROWS_FOR_WEAKNESS} rows:")
     print(
         weak_domains.head(TIMESTAMP_DOMAIN_REPORT_TOP_N)[
-            ["rows", "timestamped", "coverage_pct", "url_source", "text_source", "missing_source"]
+            [
+                "rows",
+                "timestamped",
+                "coverage_pct",
+                "url_source",
+                "text_source",
+                "htmldate_source",
+                "missing_source",
+            ]
         ].to_string(float_format=lambda value: f"{value:.1f}")
     )
 
@@ -297,7 +397,9 @@ def build_documents(train_df: pd.DataFrame, cpu_threads: int) -> pd.DataFrame:
     train_df = train_df.copy()
     train_df["document"] = (train_df["title"] + ". " + train_df["text"]).map(clean_text)
     train_df["short_document"] = (
-        train_df["title"] + ". " + train_df["text"].fillna("").astype(str).str.slice(0, 500)
+        train_df["title"]
+        + ". "
+        + train_df["text"].fillna("").astype(str).str.slice(0, 500)
     ).map(clean_text)
 
     print("\nBuilding stopword-free documents...")
