@@ -22,6 +22,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from src.campaign_scoring import add_campaign_candidate_columns
 from src.paths import CLUSTERED_PARQUET, TEMPORAL_DIR, TEMPORAL_STATS
 from src.io_utils import load_clean_data
 from src.runtime_profile import apply_runtime_profile, detect_runtime_profile, format_runtime_profile
@@ -103,6 +104,17 @@ TEMPORAL_STATS_COLUMNS = [
     "burst_duration_days",
     "article_count",
     "num_burst_periods",
+    "organic_event_title",
+    "public_affairs_title",
+    "public_affairs_signal",
+    "campaign_support_weight",
+    "campaign_recurrence_weight",
+    "campaign_active_days_weight",
+    "campaign_source_diversity_weight",
+    "campaign_span_weight",
+    "campaign_narrative_weight",
+    "campaign_candidate_score",
+    "campaign_candidate",
 ]
 
 # Kleinberg parameters
@@ -561,6 +573,7 @@ def main() -> int:
     stats_df["burst_duration_days"] = stats_df["burst_duration_daily"]
     stats_df["article_count"] = stats_df["total_articles"]
     stats_df["num_burst_periods"] = stats_df["burst_periods_daily"]
+    stats_df = add_campaign_candidate_columns(stats_df)
 
     # ---------------------------------------------------------------------------
     # REPORT

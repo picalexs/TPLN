@@ -1,9 +1,8 @@
-"""Figure D13 — Daily timelines of three highly suspicious clusters.
+"""Figure D13 - Daily timelines of top compact campaign candidates.
 
 Shows the daily article-count timeline for the top clusters by
-``suspicion_score_multi_source``, which makes the burst pattern visible.
-Reads ``data/dashboard/cluster_daily_counts.parquet`` and
-``data/temporal/cluster_temporal_stats.parquet``.
+``campaign_candidate_score`` so the burst pattern remains visible while the
+case studies avoid obvious organic event clusters.
 """
 from __future__ import annotations
 
@@ -14,17 +13,20 @@ sys.path.insert(0, str(Path(__file__).parent))
 import matplotlib.pyplot as plt
 import pandas as pd
 
-from _common import DASH, OKABE_ITO, TEMPORAL, save, setup_style, shorten, topic_label
+from _common import DASH, OKABE_ITO, ROOT, TEMPORAL, save, setup_style, shorten, topic_label
+
+sys.path.insert(0, str(ROOT))
+from src.campaign_scoring import add_campaign_candidate_columns
 
 N_PANELS = 3
 
 
 def main() -> None:
     setup_style()
-    ts = pd.read_parquet(TEMPORAL / "cluster_temporal_stats.parquet",
-                         columns=["topic_group", "cluster", "suspicion_score",
-                                  "domain_count", "burst_score_daily", "representative_title"])
-    ts["score"] = ts["suspicion_score"].where(ts["domain_count"] > 1, 0.0)
+    ts = pd.read_parquet(TEMPORAL / "cluster_temporal_stats.parquet")
+    if "campaign_candidate_score" not in ts.columns:
+        ts = add_campaign_candidate_columns(ts)
+    ts["score"] = ts["campaign_candidate_score"]
     daily = pd.read_parquet(DASH / "cluster_daily_counts.parquet")
     daily["date"] = pd.to_datetime(daily["date"])
 
@@ -34,20 +36,22 @@ def main() -> None:
     if N_PANELS == 1:
         axes = [axes]
     for ax, (_, row) in zip(axes, chosen.iterrows()):
-        sub = daily[(daily["topic_group"] == row["topic_group"]) &
-                    (daily["cluster"] == row["cluster"])]
-        sub = sub.sort_values("date")
-        ax.fill_between(sub["date"], sub["article_count"],
-                        color=OKABE_ITO[0], alpha=0.45)
-        ax.plot(sub["date"], sub["article_count"], color=OKABE_ITO[0], linewidth=1.0)
+        sub = daily[
+            (daily["topic_group"] == row["topic_group"])
+            & (daily["cluster"] == row["cluster"])
+        ].sort_values("date")
+        ax.bar(sub["date"], sub["article_count"], width=1.0, color=OKABE_ITO[0], alpha=0.75)
         ax.set_ylabel("Articles / day")
-        title = (f"[{topic_label(row['topic_group'])}] "
-                 f"{shorten(str(row['representative_title']), 80)}  "
-                 f"(suspicion = {row['score']:.2f}, "
-                 f"daily burst = {row['burst_score_daily']:.2f})")
+        title = (
+            f"[{topic_label(row['topic_group'])}] "
+            f"{shorten(str(row['representative_title']), 80)}  "
+            f"(campaign = {row['score']:.2f}, "
+            f"suspicion = {row['suspicion_score']:.2f}, "
+            f"span = {int(row['span_days'])}d)"
+        )
         ax.set_title(title, fontsize=9.5, loc="left")
     axes[-1].set_xlabel("Date")
-    fig.suptitle("Daily timelines of top suspicious clusters", y=1.0)
+    fig.suptitle("Daily timelines of top compact campaign candidates", y=1.0)
     fig.tight_layout(rect=(0, 0, 1, 0.985))
     save(fig, "D13_top_cluster_timelines")
 
