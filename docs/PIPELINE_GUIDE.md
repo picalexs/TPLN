@@ -49,91 +49,96 @@ also look temporally suspicious.
 
 ## Architecture
 
-```text
-                        +----------------------------------+
-                        | RoLargeSum dataset (HF)          |
-                        +----------------+-----------------+
-                                         |
-                                         v
-                      +--------------------------------------+
-                      | scripts/DataCuration.py              |
-                      | - clean text                         |
-                      | - extract timestamps                 |
-                      | - build document fields              |
-                      | - remove duplicates                  |
-                      +----------------+---------------------+
-                                       |
-                                       v
-                     data/rolargesum_train_clean.parquet
-                                       |
-                                       v
-                  +---------------------------------------------+
-                  | scripts/EmbeddingsClustering.py             |
-                  | - normalize topic labels                    |
-                  | - encode short_document with SBERT          |
-                  | - cache embeddings per topic                |
-                  | - persist FAISS indexes + KNN edges         |
-                  | - UMAP 15-D reduction                       |
-                  | - HDBSCAN config sweep per topic            |
-                  | - choose best clustering config             |
-                  +------------------+--------------------------+
-                                     |
-                  +------------------+--------------------------+
-                  |                                             |
-                  v                                             v
- data/embeddings/*.npy                         data/clusters/clustered_data.parquet
- data/faiss/*.faiss                            data/clusters/runtime_observability.parquet
- data/faiss/knn/*.parquet
-                                               data/clusters/hdbscan_config_results.parquet
-                                                              |
-                             +--------------------------------+--------------------------------+
-                             |                                                                 |
-                             v                                                                 v
-             +----------------------------------+                         +----------------------------------+
-             | scripts/TemporalAnalysis.py      |                         | scripts/TFIDFBaseline.py         |
-             | - daily/weekly burst detection   |                         | - TF-IDF + KMeans                |
-             | - coverage/domain/source stats   |                         | - SBERT + KMeans                 |
-             | - suspicion score                |                         | - compare with SBERT+HDBSCAN     |
-             | - campaign candidate score       |                         | - burst on/off ablation          |
-             +----------------+-----------------+                         +----------------+-----------------+
-                              |                                                              |
-                              v                                                              v
-     data/temporal/cluster_temporal_stats.parquet                        data/tfidf_ablation_report.parquet
-                              |
-                              v
-                  +-------------------------------+
-                  | scripts/Evaluation.py         |
-                  | - best-config summary         |
-                  | - intra-cluster cosine        |
-                  | - burst/size relationships    |
-                  +-------------------------------+
-                              |
-                              v
-                  data/evaluation_report.parquet
-                              |
-                              v
-                +--------------------------------------+
-                | scripts/PrepareDashboardData.py      |
-                | - build dashboard parquet assets     |
-                | - cluster overview                   |
-                | - article detail                     |
-                | - daily counts                       |
-                | - scatter sample                     |
-                | - semantic neighbor evidence         |
-                | - cross-cluster similarity           |
-                +----------------+---------------------+
-                                 |
-                                 v
-                       data/dashboard/*.parquet
-                                 |
-                                 v
-                         scripts/Dashboard.py (Streamlit)
-                                 |
-                                 v
-                 scripts/report_figures/run_all.py
-                                 |
-                                 v
-                       report/figures/*.png
+```mermaid
+flowchart TD
+    raw["RoLargeSum dataset<br/>Hugging Face"]:::input
+
+    subgraph curate["1. Data Curation"]
+        direction TB
+        dc["scripts/DataCuration.py"]:::prepStep
+        cleanText["clean text<br/>deduplicate documents"]:::prepStep
+        dates["extract timestamps<br/>URL, text, htmldate"]:::prepStep
+        cleanData["data/rolargesum_train_clean.parquet"]:::prepArtefact
+    end
+
+    subgraph semantic["2. Embeddings And Clustering"]
+        direction TB
+        ec["scripts/EmbeddingsClustering.py"]:::semanticStep
+        topicMap["normalize topic labels"]:::semanticStep
+        sbert["SBERT short_document embeddings"]:::semanticStep
+        umapHdb["UMAP 15-D + HDBSCAN sweep"]:::semanticStep
+        clustered["data/clusters/clustered_data.parquet"]:::semanticArtefact
+        config["hdbscan_config_results.parquet<br/>runtime_observability.parquet"]:::semanticArtefact
+        faiss["data/embeddings/*.npy<br/>data/faiss/ + data/faiss/knn/"]:::semanticArtefact
+    end
+
+    subgraph temporal["3. Temporal Analysis"]
+        direction TB
+        ta["scripts/TemporalAnalysis.py"]:::temporalStep
+        burst["daily and weekly burst detection"]:::temporalStep
+        sourceStats["timestamp, domain, source stats"]:::temporalStep
+        suspicion["suspicion + campaign-candidate scoring"]:::temporalStep
+        temporalStats["data/temporal/cluster_temporal_stats.parquet"]:::temporalArtefact
+    end
+
+    subgraph compare["4. Evaluation And Ablation"]
+        direction TB
+        ev["scripts/Evaluation.py"]:::qaStep
+        tfidf["scripts/TFIDFBaseline.py"]:::qaStep
+        evalReport["data/evaluation_report.parquet"]:::qaArtefact
+        ablationReport["data/tfidf_ablation_report.parquet"]:::qaArtefact
+        analysisBundle["analysis-ready artefacts<br/>clusters, temporal stats, FAISS KNN, reports"]:::qaArtefact
+    end
+
+    subgraph publish["5. Dashboard And Report Outputs"]
+        direction TB
+        publishInputs["curated dashboard/report inputs"]:::publishArtefact
+        prepDash["scripts/PrepareDashboardData.py"]:::publishStep
+        dashData["data/dashboard/*.parquet"]:::publishArtefact
+        dashboard["scripts/Dashboard.py<br/>Streamlit explorer"]:::output
+        figures["scripts/report_figures/run_all.py<br/>report/figures/*.png"]:::output
+    end
+
+    raw --> dc --> cleanText --> dates --> cleanData
+    cleanData --> ec --> topicMap --> sbert --> umapHdb --> clustered
+    umapHdb --> config
+    sbert -. cache and neighbor search .-> faiss
+
+    clustered --> ta --> burst --> sourceStats --> suspicion --> temporalStats
+
+    clustered --> ev
+    config --> ev
+    faiss -. cosine metrics .-> ev
+    temporalStats --> ev --> evalReport
+    cleanData --> tfidf
+    tfidf --> ablationReport
+    evalReport --> analysisBundle
+    ablationReport --> analysisBundle
+
+    analysisBundle --> publishInputs
+    publishInputs --> prepDash
+    prepDash --> dashData
+    dashData --> dashboard
+    dashData --> figures
+
+    style curate fill:#172554,stroke:#60a5fa,stroke-width:1.5px,color:#ffffff
+    style semantic fill:#312e81,stroke:#a5b4fc,stroke-width:1.5px,color:#ffffff
+    style temporal fill:#451a03,stroke:#fbbf24,stroke-width:1.5px,color:#ffffff
+    style compare fill:#052e16,stroke:#34d399,stroke-width:1.5px,color:#ffffff
+    style publish fill:#0f172a,stroke:#94a3b8,stroke-width:1.5px,color:#ffffff
+
+    classDef input fill:#020617,stroke:#e2e8f0,stroke-width:2px,color:#ffffff
+    classDef prepStep fill:#1e3a8a,stroke:#93c5fd,stroke-width:1.4px,color:#ffffff
+    classDef semanticStep fill:#3730a3,stroke:#c7d2fe,stroke-width:1.4px,color:#ffffff
+    classDef temporalStep fill:#92400e,stroke:#fde68a,stroke-width:1.4px,color:#ffffff
+    classDef qaStep fill:#065f46,stroke:#a7f3d0,stroke-width:1.4px,color:#ffffff
+    classDef publishStep fill:#334155,stroke:#cbd5e1,stroke-width:1.4px,color:#ffffff
+    classDef prepArtefact fill:#1d4ed8,stroke:#bfdbfe,stroke-width:1.2px,color:#ffffff
+    classDef semanticArtefact fill:#4338ca,stroke:#ddd6fe,stroke-width:1.2px,color:#ffffff
+    classDef temporalArtefact fill:#b45309,stroke:#fde68a,stroke-width:1.2px,color:#ffffff
+    classDef qaArtefact fill:#047857,stroke:#bbf7d0,stroke-width:1.2px,color:#ffffff
+    classDef publishArtefact fill:#475569,stroke:#e2e8f0,stroke-width:1.2px,color:#ffffff
+    classDef output fill:#020617,stroke:#f8fafc,stroke-width:1.8px,color:#ffffff
 ```
 
 ## Data Artefacts

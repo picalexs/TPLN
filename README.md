@@ -10,6 +10,8 @@ Start here:
   stage-by-stage data flow.
 - [Report figures guide](report/figures/FIGURES.md) - generated figures, source
   data, and figure scripts.
+- [Top 5 compact campaign candidates](report/figures/TOP_5_COMPACT_CAMPAIGN_CANDIDATES.md) -
+  report-facing examples ranked by campaign-candidate score.
 - [Requirements](requirements.txt) - pinned Python dependencies.
 - [Environment template](.env.example) - Hugging Face token placeholder for the
   first data download.
