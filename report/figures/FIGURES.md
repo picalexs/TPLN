@@ -151,25 +151,30 @@ what the pipeline is designed to surface.
 **Use as:** motivation for ranking by suspicion rather than treating it as a
 binary label.
 
-### D12 — Top 15 most suspicious clusters
+### D12 — Top 15 compact campaign candidates
 
 **Source:** `data/temporal/cluster_temporal_stats.parquet`. Horizontal bars of
-the highest-scoring multi-source clusters (those with `domain_count > 1`),
-labeled with their representative article title and topic. The top clusters score
-in the 19–22 range and are concentrated in the Social topic. Each bar also shows
-the article count so the reader can see whether the score comes from a genuinely
-large cluster or a small but tightly concentrated burst.
-**Use as:** the headline result figure — "did the pipeline find anything
-interesting?"
+the highest-scoring clusters by `campaign_candidate_score`. This score starts
+from `suspicion_score`, then applies stricter report-facing filters: enough
+article support, recurring burst periods, enough active days, source diversity,
+compact temporal span, and a public-affairs narrative signal. The span gate gives
+full credit up to 180 days and reaches zero at one year, so multi-year semantic
+themes cannot be presented as campaign episodes. Obvious organic event titles
+(accidents, weather alerts, thefts, deaths, police briefs, and routine COVID
+case/death/vaccination-logistics updates) are zeroed out. COVID policy,
+restriction, certificate, and controversy narratives are still allowed.
+**Use as:** the headline candidate figure, with the caveat that these are
+ranked candidates rather than verified coordinated campaigns.
 
-### D13 — Daily timelines of the top suspicious clusters
+### D13 — Daily timelines of the top compact campaign candidates
 
 **Source:** `data/dashboard/cluster_daily_counts.parquet` and
 `data/temporal/cluster_temporal_stats.parquet`. Three stacked panels showing the
-daily article counts for the top-3 multi-source clusters by suspicion score, with
-their final suspicion and daily burst scores in the title. The bursty pattern is
-visible as a narrow spike over a near-zero baseline, confirming why each cluster
-scored high.
+daily article counts for the top-3 clusters by `campaign_candidate_score`. Each
+title shows both the campaign-candidate score and the underlying suspicion
+score, making it clear that the final case-study ranking is stricter than the
+generic burst ranking. The plot uses daily bars rather than a filled line so
+sparse publication dates are not visually connected across long gaps.
 **Use as:** qualitative case study right after D12.
 
 ### D14 — Daily vs. weekly burst score
@@ -183,21 +188,22 @@ measures disagree often enough that having both is not redundant.
 **Use as:** evidence that daily and weekly burst scoring capture different
 phenomena.
 
-### D15 — Suspicion score breakdown for top-K clusters
+### D15 — Suspicion and campaign-candidate score breakdown
 
 **Source:** `data/temporal/cluster_temporal_stats.parquet`. Two panels for the
-top 12 multi-source clusters by suspicion score:
+top 12 clusters by `campaign_candidate_score`:
 
-- Left waterfall: `raw burst score` → `after multiplicative gating` (raw ×
-  support_weight × coverage_weight × source_weight × domain_weight) → `final
-  score` (the gated value minus penalties).
-- Right heatmap: the four 0–1 gating weights and three penalty terms
-  (`long_sparse_span_penalty`, `single_domain_penalty`,
-  `source_reliability_penalty`).
+- Left bars: `raw burst score`, `after temporal gates`, broad
+  `suspicion_score`, and final `campaign_candidate_score`.
+- Right heatmap: the original temporal gates plus the campaign-candidate gates
+  for article support, recurrence, active days, source diversity, compact span,
+  and narrative signal.
 
-The formula `max(0, raw · ∏weights) − penalties` is made concrete: you can see
-which weight is suppressing an otherwise-high raw score and which penalty is
-shaving off the remainder. **Use as:** explains the suspicion formula concretely.
+This figure explains why the earlier top-ranked false positives disappeared:
+small organic incidents and multi-year semantic themes can still have high burst
+suspicion, but their campaign candidate score collapses when the
+support/recurrence/span/narrative filters are applied. **Use as:** the concrete
+explanation of the stricter headline ranking.
 
 ---
 
@@ -295,12 +301,15 @@ super-linear if HDBSCAN sweep iterations grow with topic size.
 - **`quality_index` normalization quirk.** `quality_index` is min-max normalized
   per topic across methods. SBERT+KMeans is worst on every topic, so it is pinned
   to 0 — expected and not a bug.
-- **Multi-source vs. all-cluster suspicion.** Figures D11–D13, D15, E16, E17 use
-  a derived "multi-source" score: `suspicion_score` is kept as-is for clusters
-  with `domain_count > 1` and treated as zero for single-domain clusters. The
-  original pipeline column `suspicion_score_multi_source` (and the binary flag
-  `is_single_source`) is not present in the current parquet — the derivation from
-  `domain_count` is equivalent.
+- **Suspicion vs. campaign candidates.** `suspicion_score` is a broad burst score
+  and can surface organic news events or multi-year semantic themes. Figures D12,
+  D13, and D15 now use `campaign_candidate_score`, which adds support,
+  recurrence, compact-span, source-diversity, and title-based organic-event
+  filters for report case studies. COVID is not blanket-filtered; only routine
+  health counters and logistics are treated as organic updates.
+- **Multi-source vs. all-cluster suspicion.** Figures D11, E16, and E17 use a
+  derived multi-source score: `suspicion_score` is kept as-is for clusters with
+  `domain_count > 1` and treated as zero for single-domain clusters.
 - **Removed pipeline stages.** `dedup_seconds` and `reassign_seconds` were
   present in an earlier pipeline version but are no longer written to
   `runtime_observability.parquet`. G22 shows only the five stages that remain:
