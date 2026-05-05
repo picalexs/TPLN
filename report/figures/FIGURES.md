@@ -5,8 +5,45 @@ matching script in `scripts/report_figures/fig_<id>.py`. Static PNG at 300 DPI,
 sized for a Word page. Pick whichever you want to include — the IDs (A1, B5, …)
 are independent of report ordering.
 
+Related documentation:
+
+- [Project README](../../README.md)
+- [Pipeline guide](../../docs/PIPELINE_GUIDE.md)
+- [Top 5 compact campaign candidates](TOP_5_COMPACT_CAMPAIGN_CANDIDATES.md)
+- [Figure-generation script folder](../../scripts/report_figures/)
+- [Shared figure helpers](../../scripts/report_figures/_common.py)
+
 To regenerate everything: `python scripts/report_figures/run_all.py`. To
-regenerate one figure: `python scripts/report_figures/fig_<id>.py`.
+regenerate one figure, run its matching script from the table below, for example
+`python scripts/report_figures/fig_A1_topic_distribution.py`.
+
+Generated figure index:
+
+| ID | PNG | Script |
+|---|---|---|
+| A1 | [Topic distribution](A1_topic_distribution.png) | [fig_A1_topic_distribution.py](../../scripts/report_figures/fig_A1_topic_distribution.py) |
+| A2 | [Timestamp source breakdown](A2_timestamp_source_breakdown.png) | [fig_A2_timestamp_source_breakdown.py](../../scripts/report_figures/fig_A2_timestamp_source_breakdown.py) |
+| A3 | [Timestamp coverage](A3_timestamp_coverage.png) | [fig_A3_timestamp_coverage.py](../../scripts/report_figures/fig_A3_timestamp_coverage.py) |
+| A4 | [Corpus timeline](A4_corpus_timeline.png) | [fig_A4_corpus_timeline.py](../../scripts/report_figures/fig_A4_corpus_timeline.py) |
+| B5 | [Cluster size distribution](B5_cluster_size_distribution.png) | [fig_B5_cluster_size_distribution.py](../../scripts/report_figures/fig_B5_cluster_size_distribution.py) |
+| B6 | [Noise rate per topic](B6_noise_rate_per_topic.png) | [fig_B6_noise_rate_per_topic.py](../../scripts/report_figures/fig_B6_noise_rate_per_topic.py) |
+| B7 | [UMAP scatter](B7_umap_scatter.png) | [fig_B7_umap_scatter.py](../../scripts/report_figures/fig_B7_umap_scatter.py) |
+| B8 | [Silhouette and intra-cosine](B8_silhouette_intracosine.png) | [fig_B8_silhouette_intracosine.py](../../scripts/report_figures/fig_B8_silhouette_intracosine.py) |
+| C9 | [HDBSCAN sweep scatter](C9_hdbscan_sweep_scatter.png) | [fig_C9_hdbscan_sweep_scatter.py](../../scripts/report_figures/fig_C9_hdbscan_sweep_scatter.py) |
+| C10 | [HDBSCAN silhouette heatmap](C10_hdbscan_silhouette_heatmap.png) | [fig_C10_hdbscan_silhouette_heatmap.py](../../scripts/report_figures/fig_C10_hdbscan_silhouette_heatmap.py) |
+| D11 | [Suspicion distribution](D11_suspicion_distribution.png) | [fig_D11_suspicion_distribution.py](../../scripts/report_figures/fig_D11_suspicion_distribution.py) |
+| D12 | [Top suspicious clusters](D12_top_suspicious_clusters.png) | [fig_D12_top_suspicious_clusters.py](../../scripts/report_figures/fig_D12_top_suspicious_clusters.py) |
+| D13 | [Top cluster timelines](D13_top_cluster_timelines.png) | [fig_D13_top_cluster_timelines.py](../../scripts/report_figures/fig_D13_top_cluster_timelines.py) |
+| D15 | [Suspicion components](D15_suspicion_components.png) | [fig_D15_suspicion_components.py](../../scripts/report_figures/fig_D15_suspicion_components.py) |
+| D16 | [Candidate types](D16_candidate_types.png) | [fig_D16_candidate_types.py](../../scripts/report_figures/fig_D16_candidate_types.py) |
+| E16 | [Domain entropy vs suspicion](E16_domain_entropy_vs_suspicion.png) | [fig_E16_domain_entropy_vs_suspicion.py](../../scripts/report_figures/fig_E16_domain_entropy_vs_suspicion.py) |
+| E17 | [Single vs multi-source](E17_single_vs_multi_source.png) | [fig_E17_single_vs_multi_source.py](../../scripts/report_figures/fig_E17_single_vs_multi_source.py) |
+| F18 | [Quality index by method](F18_quality_index_by_method.png) | [fig_F18_quality_index_by_method.py](../../scripts/report_figures/fig_F18_quality_index_by_method.py) |
+| F19 | [Silhouette vs Davies-Bouldin](F19_silhouette_vs_db.png) | [fig_F19_silhouette_vs_db.py](../../scripts/report_figures/fig_F19_silhouette_vs_db.py) |
+| F20 | [Runtime vs silhouette](F20_runtime_vs_silhouette.png) | [fig_F20_runtime_vs_silhouette.py](../../scripts/report_figures/fig_F20_runtime_vs_silhouette.py) |
+| F21 | [Method win counts](F21_method_win_counts.png) | [fig_F21_method_win_counts.py](../../scripts/report_figures/fig_F21_method_win_counts.py) |
+| G22 | [Runtime breakdown](G22_runtime_breakdown.png) | [fig_G22_runtime_breakdown.py](../../scripts/report_figures/fig_G22_runtime_breakdown.py) |
+| G23 | [Topic size vs runtime](G23_topic_size_vs_runtime.png) | [fig_G23_topic_size_vs_runtime.py](../../scripts/report_figures/fig_G23_topic_size_vs_runtime.py) |
 
 Conventions
 

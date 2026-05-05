@@ -1,7 +1,10 @@
 # Top 5 Compact Campaign Candidates
 
-Source: `data/temporal/cluster_temporal_stats.parquet` and
-`data/dashboard/cluster_articles.parquet`.
+Source: [data/temporal/cluster_temporal_stats.parquet](../../data/temporal/cluster_temporal_stats.parquet)
+and [data/dashboard/cluster_articles.parquet](../../data/dashboard/cluster_articles.parquet).
+
+Related docs: [Project README](../../README.md), [pipeline guide](../../docs/PIPELINE_GUIDE.md),
+and [report figures guide](FIGURES.md).
 
 These entries match the report graph logic because they are ranked by
 `campaign_candidate_score`, not by broad `suspicion_score`.
