@@ -14,6 +14,12 @@ models and algorithms are doing.
   - [`scripts/TFIDFBaseline.py`](../scripts/TFIDFBaseline.py)
   - [`scripts/PrepareDashboardData.py`](../scripts/PrepareDashboardData.py)
   - [`scripts/Dashboard.py`](../scripts/Dashboard.py)
+- Optional maintenance and report entrypoints:
+  - [`scripts/apply_campaign_candidate_scoring.py`](../scripts/apply_campaign_candidate_scoring.py)
+  - [`scripts/fix_multiyear_suspicion.py`](../scripts/fix_multiyear_suspicion.py)
+  - [`scripts/report_figures/run_all.py`](../scripts/report_figures/run_all.py)
+  - [`report/figures/FIGURES.md`](../report/figures/FIGURES.md)
+  - [`report/figures/TOP_5_COMPACT_CAMPAIGN_CANDIDATES.md`](../report/figures/TOP_5_COMPACT_CAMPAIGN_CANDIDATES.md)
 - Shared infrastructure:
   - [`src/config.py`](../src/config.py)
   - [`src/paths.py`](../src/paths.py)
@@ -22,6 +28,7 @@ models and algorithms are doing.
   - [`src/topic_mapping.py`](../src/topic_mapping.py)
   - [`src/text_processing.py`](../src/text_processing.py)
   - [`src/date_extraction.py`](../src/date_extraction.py)
+  - [`src/campaign_scoring.py`](../src/campaign_scoring.py)
 - Entry points are grouped in `scripts/` so the repo root stays focused on
   shared code, docs, and configuration.
 
@@ -42,100 +49,124 @@ also look temporally suspicious.
 
 ## Architecture
 
-```text
-                        +----------------------------------+
-                        | RoLargeSum dataset (HF)          |
-                        +----------------+-----------------+
-                                         |
-                                         v
-                      +--------------------------------------+
-                      | scripts/DataCuration.py              |
-                      | - clean text                         |
-                      | - extract timestamps                 |
-                      | - build document fields              |
-                      | - remove duplicates                  |
-                      +----------------+---------------------+
-                                       |
-                                       v
-                     data/rolargesum_train_clean.parquet
-                                       |
-                                       v
-                  +---------------------------------------------+
-                  | scripts/EmbeddingsClustering.py             |
-                  | - normalize topic labels                    |
-                  | - encode short_document with SBERT          |
-                  | - cache embeddings per topic                |
-                  | - UMAP 15-D reduction                       |
-                  | - HDBSCAN config sweep per topic            |
-                  | - choose best clustering config             |
-                  +------------------+--------------------------+
-                                     |
-                  +------------------+--------------------------+
-                  |                                             |
-                  v                                             v
- data/embeddings/*.npy                         data/clusters/clustered_data.parquet
-                                               data/clusters/hdbscan_config_results.parquet
-                                                              |
-                             +--------------------------------+--------------------------------+
-                             |                                                                 |
-                             v                                                                 v
-             +----------------------------------+                         +----------------------------------+
-             | scripts/TemporalAnalysis.py      |                         | scripts/TFIDFBaseline.py         |
-             | - daily/weekly burst detection   |                         | - TF-IDF + KMeans                |
-             | - coverage/domain/source stats   |                         | - SBERT + KMeans                 |
-             | - suspicion score                |                         | - compare with SBERT+HDBSCAN     |
-             +----------------+-----------------+                         +----------------+-----------------+
-                              |                                                              |
-                              v                                                              v
-     data/temporal/cluster_temporal_stats.parquet                        data/tfidf_ablation_report.parquet
-                              |
-                              v
-                  +-------------------------------+
-                  | scripts/Evaluation.py         |
-                  | - best-config summary         |
-                  | - intra-cluster cosine        |
-                  | - burst/size relationships    |
-                  +-------------------------------+
-                              |
-                              v
-                  data/evaluation_report.parquet
-                              |
-                              v
-                +--------------------------------------+
-                | scripts/PrepareDashboardData.py      |
-                | - build dashboard parquet assets     |
-                | - cluster overview                   |
-                | - article detail                     |
-                | - daily counts                       |
-                | - scatter sample                     |
-                +----------------+---------------------+
-                                 |
-                                 v
-                       data/dashboard/*.parquet
-                                 |
-                                 v
-                         scripts/Dashboard.py (Streamlit)
+```mermaid
+flowchart TD
+    raw["RoLargeSum dataset<br/>Hugging Face"]:::input
+
+    subgraph curate["1. Data Curation"]
+        direction TB
+        dc["scripts/DataCuration.py"]:::prepStep
+        cleanText["clean text<br/>deduplicate documents"]:::prepStep
+        dates["extract timestamps<br/>URL, text, htmldate"]:::prepStep
+        cleanData["data/rolargesum_train_clean.parquet"]:::prepArtefact
+    end
+
+    subgraph semantic["2. Embeddings And Clustering"]
+        direction TB
+        ec["scripts/EmbeddingsClustering.py"]:::semanticStep
+        topicMap["normalize topic labels"]:::semanticStep
+        sbert["SBERT short_document embeddings"]:::semanticStep
+        umapHdb["UMAP 15-D + HDBSCAN sweep"]:::semanticStep
+        clustered["data/clusters/clustered_data.parquet"]:::semanticArtefact
+        config["hdbscan_config_results.parquet<br/>runtime_observability.parquet"]:::semanticArtefact
+        faiss["data/embeddings/*.npy<br/>data/faiss/ + data/faiss/knn/"]:::semanticArtefact
+    end
+
+    subgraph temporal["3. Temporal Analysis"]
+        direction TB
+        ta["scripts/TemporalAnalysis.py"]:::temporalStep
+        burst["daily and weekly burst detection"]:::temporalStep
+        sourceStats["timestamp, domain, source stats"]:::temporalStep
+        suspicion["suspicion + campaign-candidate scoring"]:::temporalStep
+        temporalStats["data/temporal/cluster_temporal_stats.parquet"]:::temporalArtefact
+    end
+
+    subgraph compare["4. Evaluation And Ablation"]
+        direction TB
+        ev["scripts/Evaluation.py"]:::qaStep
+        tfidf["scripts/TFIDFBaseline.py"]:::qaStep
+        evalReport["data/evaluation_report.parquet"]:::qaArtefact
+        ablationReport["data/tfidf_ablation_report.parquet"]:::qaArtefact
+        analysisBundle["analysis-ready artefacts<br/>clusters, temporal stats, FAISS KNN, reports"]:::qaArtefact
+    end
+
+    subgraph publish["5. Dashboard And Report Outputs"]
+        direction TB
+        publishInputs["curated dashboard/report inputs"]:::publishArtefact
+        prepDash["scripts/PrepareDashboardData.py"]:::publishStep
+        dashData["data/dashboard/*.parquet"]:::publishArtefact
+        dashboard["scripts/Dashboard.py<br/>Streamlit explorer"]:::output
+        figures["scripts/report_figures/run_all.py<br/>report/figures/*.png"]:::output
+    end
+
+    raw --> dc --> cleanText --> dates --> cleanData
+    cleanData --> ec --> topicMap --> sbert --> umapHdb --> clustered
+    umapHdb --> config
+    sbert -. cache and neighbor search .-> faiss
+
+    clustered --> ta --> burst --> sourceStats --> suspicion --> temporalStats
+
+    clustered --> ev
+    config --> ev
+    faiss -. cosine metrics .-> ev
+    temporalStats --> ev --> evalReport
+    cleanData --> tfidf
+    tfidf --> ablationReport
+    evalReport --> analysisBundle
+    ablationReport --> analysisBundle
+
+    analysisBundle --> publishInputs
+    publishInputs --> prepDash
+    prepDash --> dashData
+    dashData --> dashboard
+    dashData --> figures
+
+    style curate fill:#172554,stroke:#60a5fa,stroke-width:1.5px,color:#ffffff
+    style semantic fill:#312e81,stroke:#a5b4fc,stroke-width:1.5px,color:#ffffff
+    style temporal fill:#451a03,stroke:#fbbf24,stroke-width:1.5px,color:#ffffff
+    style compare fill:#052e16,stroke:#34d399,stroke-width:1.5px,color:#ffffff
+    style publish fill:#0f172a,stroke:#94a3b8,stroke-width:1.5px,color:#ffffff
+
+    classDef input fill:#020617,stroke:#e2e8f0,stroke-width:2px,color:#ffffff
+    classDef prepStep fill:#1e3a8a,stroke:#93c5fd,stroke-width:1.4px,color:#ffffff
+    classDef semanticStep fill:#3730a3,stroke:#c7d2fe,stroke-width:1.4px,color:#ffffff
+    classDef temporalStep fill:#92400e,stroke:#fde68a,stroke-width:1.4px,color:#ffffff
+    classDef qaStep fill:#065f46,stroke:#a7f3d0,stroke-width:1.4px,color:#ffffff
+    classDef publishStep fill:#334155,stroke:#cbd5e1,stroke-width:1.4px,color:#ffffff
+    classDef prepArtefact fill:#1d4ed8,stroke:#bfdbfe,stroke-width:1.2px,color:#ffffff
+    classDef semanticArtefact fill:#4338ca,stroke:#ddd6fe,stroke-width:1.2px,color:#ffffff
+    classDef temporalArtefact fill:#b45309,stroke:#fde68a,stroke-width:1.2px,color:#ffffff
+    classDef qaArtefact fill:#047857,stroke:#bbf7d0,stroke-width:1.2px,color:#ffffff
+    classDef publishArtefact fill:#475569,stroke:#e2e8f0,stroke-width:1.2px,color:#ffffff
+    classDef output fill:#020617,stroke:#f8fafc,stroke-width:1.8px,color:#ffffff
 ```
 
 ## Data Artefacts
 
 The pipeline is parquet-first for tabular data. The important outputs are:
 
-- `data/rolargesum_raw.parquet`
-- `data/rolargesum_train_clean.parquet`
-- `data/embeddings/*.npy`
-- `data/clusters/clustered_data.parquet`
-- `data/clusters/hdbscan_config_results.parquet`
-- `data/temporal/cluster_temporal_stats.parquet`
-- `data/evaluation_report.parquet`
-- `data/tfidf_ablation_report.parquet`
-- `data/dashboard/*.parquet`
+- [`data/rolargesum_raw.parquet`](../data/rolargesum_raw.parquet)
+- [`data/rolargesum_train_clean.parquet`](../data/rolargesum_train_clean.parquet)
+- [`data/embeddings/*.npy`](../data/embeddings/)
+- [`data/faiss/*.faiss`](../data/faiss/)
+- [`data/faiss/*.json`](../data/faiss/)
+- [`data/faiss/knn/*_knn.parquet`](../data/faiss/knn/)
+- [`data/clusters/clustered_data.parquet`](../data/clusters/clustered_data.parquet)
+- [`data/clusters/hdbscan_config_results.parquet`](../data/clusters/hdbscan_config_results.parquet)
+- [`data/clusters/runtime_observability.parquet`](../data/clusters/runtime_observability.parquet)
+- [`data/temporal/cluster_temporal_stats.parquet`](../data/temporal/cluster_temporal_stats.parquet)
+- [`data/evaluation_report.parquet`](../data/evaluation_report.parquet)
+- [`data/tfidf_ablation_report.parquet`](../data/tfidf_ablation_report.parquet)
+- [`data/dashboard/*.parquet`](../data/dashboard/)
+- [`report/figures/*.png`](../report/figures/)
 
 Why this matters:
 
 - parquet is much faster than CSV for large intermediate tables
 - embeddings stay as `.npy` because they are dense numeric arrays and are reused
   directly by multiple scripts
+- FAISS indexes and KNN edge parquet files are persisted so the dashboard can
+  show semantic-neighbor evidence without rebuilding nearest-neighbor search
 
 ## Stage 1: Data Curation
 
@@ -162,9 +193,10 @@ Main responsibilities:
    - `dialect`
    - `url`
    - `author`
-3. Extract timestamps in two passes:
+3. Extract timestamps in three passes:
    - first from URL structure
    - then from article text if URL extraction fails
+   - then from `htmldate` as a final URL-based fallback
 4. Validate timestamp quality and reject impossible future dates.
 5. Build:
    - `document`: title + full article text
@@ -192,10 +224,12 @@ Timestamp extraction is layered on purpose:
    publication dates in the article URL.
 2. If that fails, the pipeline scans the article text for publication-like date
    snippets near the article header.
+3. If both local passes fail, the pipeline tries `htmldate` against the URL as a
+   final fallback.
 
 Each timestamp also gets:
 
-- `timestamp_source`: `url`, `text`, or `missing`
+- `timestamp_source`: `url`, `text`, `htmldate`, or `missing`
 - `timestamp_quality`: `high`, `medium`, `low`, `missing`, or `rejected_future`
 
 That information is later reused by the temporal stage to avoid trusting weak
@@ -284,15 +318,24 @@ That gives two benefits:
 2. later scripts like [`scripts/Evaluation.py`](../scripts/Evaluation.py) and
    [`scripts/TFIDFBaseline.py`](../scripts/TFIDFBaseline.py) can reuse the same embeddings
 
-### Why FAISS is still present
+### Why FAISS is persisted
 
-The script builds an in-memory FAISS index for quick nearest-neighbor inspection
-and sanity checks. It is not persisted anymore, because it is not a required
-downstream artefact.
+The script now builds and persists one FAISS index per eligible topic in
+`data/faiss/`, together with a small JSON metadata file. The metadata includes a
+document fingerprint so stale indexes can be rebuilt safely when topic contents
+change.
 
-FAISS here is mainly a debugging and validation helper:
+By default the script also writes top-k nearest-neighbor edges to
+`data/faiss/knn/*_knn.parquet`. Those edges are consumed by
+[`scripts/PrepareDashboardData.py`](../scripts/PrepareDashboardData.py) and then
+shown in [`scripts/Dashboard.py`](../scripts/Dashboard.py) as semantic-neighbor
+evidence for selected articles.
 
-- “do near-neighbor articles actually look semantically related?”
+FAISS has three roles here:
+
+- reuse nearest-neighbor indexes across runs
+- provide dashboard evidence for "these articles are semantically close"
+- support optional debugging with `--debug-neighbors`
 
 ### What UMAP is doing
 
@@ -362,9 +405,16 @@ The final clustered parquet contains article-level labels and metadata such as:
 - `cluster_size`
 - `cluster_membership_strength`
 - `cluster_outlier_score`
+- `topic_row_idx`
 - `umap_x`
 - `umap_y`
 - best HDBSCAN config fields
+
+The stage also writes:
+
+- persisted FAISS indexes and metadata in `data/faiss/`
+- top-k neighbor edges in `data/faiss/knn/`
+- per-topic timing rows in `data/clusters/runtime_observability.parquet`
 
 Small topics below `MIN_TOPIC_SIZE` are not clustered; they are marked as noise
 with `topic_is_eligible = False`.
@@ -431,6 +481,29 @@ It is closer to:
 - “strong burst signal, with enough timestamp support, decent source quality,
   and not just one low-diversity domain dominating everything”
 
+### Campaign-candidate scoring
+
+[`scripts/TemporalAnalysis.py`](../scripts/TemporalAnalysis.py) now also calls
+[`src/campaign_scoring.py`](../src/campaign_scoring.py) before writing
+`data/temporal/cluster_temporal_stats.parquet`.
+
+The broad `suspicion_score` is intentionally generous: it can surface organic
+bursty events, recurring themes, and noisy cases worth inspecting. The stricter
+`campaign_candidate_score` is report-facing. It starts from `suspicion_score`
+and applies additional weights for:
+
+- article support
+- recurring daily burst periods
+- active-day support
+- source diversity
+- compact temporal span
+- public-affairs narrative signal
+- obvious organic-event title filtering
+
+Use [`scripts/apply_campaign_candidate_scoring.py`](../scripts/apply_campaign_candidate_scoring.py)
+only when an existing temporal parquet needs to be refreshed after scoring logic
+changes. A normal fresh temporal run already includes those columns.
+
 ## Stage 5: Evaluation
 
 Code:
@@ -468,6 +541,7 @@ It compares:
 1. TF-IDF + KMeans
 2. SBERT + KMeans
 3. SBERT + HDBSCAN
+4. SBERT + HDBSCAN with burst scoring enabled vs disabled
 
 ### What TF-IDF is
 
@@ -511,7 +585,10 @@ So this script precomputes:
 - per-cluster daily counts
 - article detail parquet
 - sampled scatter parquet
+- semantic neighbor parquet from FAISS KNN edges
+- cluster-similarity parquet for the dashboard similarity map
 - copied temporal/config/evaluation/ablation assets
+- copied runtime observability asset
 - one global dashboard metadata file
 
 ### Why there is a scatter sample
@@ -540,6 +617,8 @@ Pages:
 - Cluster Explorer
 - Timeline and Bursts
 - Top Campaigns
+- Similarity Map
+- Topic Health
 - Evaluation and Ablation
 
 Main design choice:
@@ -548,6 +627,31 @@ Main design choice:
   [`scripts/PrepareDashboardData.py`](../scripts/PrepareDashboardData.py)
 
 That keeps the UI responsive and startup time manageable.
+
+## Stage 9: Report Figures
+
+Code and docs:
+
+- [`scripts/report_figures/run_all.py`](../scripts/report_figures/run_all.py)
+- [`scripts/report_figures/_common.py`](../scripts/report_figures/_common.py)
+- [`report/figures/FIGURES.md`](../report/figures/FIGURES.md)
+- [`report/figures/TOP_5_COMPACT_CAMPAIGN_CANDIDATES.md`](../report/figures/TOP_5_COMPACT_CAMPAIGN_CANDIDATES.md)
+
+The report figure scripts read existing parquet artefacts and write static PNGs
+to `report/figures/`. They do not rerun data curation, embeddings, clustering,
+or temporal analysis.
+
+Run all figures with:
+
+```bash
+python scripts/report_figures/run_all.py
+```
+
+Run one figure with its matching script, for example:
+
+```bash
+python scripts/report_figures/fig_A1_topic_distribution.py
+```
 
 ## Hardware / Performance Layer
 
@@ -560,7 +664,7 @@ reasonable defaults.
 
 ### What it auto-detects
 
-- `cuda`, `mps`, or `cpu`
+- `cuda`, `mps`, `dml`, or `cpu`
 - GPU name and memory when available
 - CPU thread count
 - embedding batch size
@@ -572,9 +676,9 @@ Only Sentence-BERT embedding inference is GPU-accelerated in the main pipeline.
 
 That means:
 
-- [`scripts/EmbeddingsClustering.py`](../scripts/EmbeddingsClustering.py) can run SBERT on CUDA
-- UMAP, HDBSCAN, temporal analysis, TF-IDF, evaluation, and dashboard prep
-  remain CPU-based
+- [`scripts/EmbeddingsClustering.py`](../scripts/EmbeddingsClustering.py) can run SBERT on CUDA, MPS, or DirectML when the local PyTorch runtime supports it
+- FAISS, UMAP, HDBSCAN, temporal analysis, TF-IDF, evaluation, dashboard prep,
+  and report figure generation remain CPU-based
 
 ### Why this split is intentional
 
@@ -583,7 +687,7 @@ accelerate without changing model behavior or adding major platform complexity.
 
 ## Important Design Choices
 
-### 1. Parquet-only tabular pipeline
+### 1. Parquet-first tabular pipeline
 
 The code used to rely heavily on CSV. It now uses parquet for normal execution
 because parquet is:
@@ -592,6 +696,10 @@ because parquet is:
 - faster to write
 - more compact
 - better for repeated downstream loading
+
+Dense vectors and similarity-search assets are kept in their native formats:
+`.npy` for embeddings, `.faiss` plus `.json` metadata for FAISS indexes, and
+parquet for KNN edges.
 
 ### 2. Topic-first clustering
 
@@ -620,6 +728,7 @@ burst”. It is a combination of:
 - timestamp reliability
 - domain diversity
 - penalties for weak evidence
+- report-facing campaign-candidate filters when ranking compact case studies
 
 ## Common Questions
 
@@ -655,8 +764,8 @@ recomputing SBERT embeddings every time.
   embedding vectors before clustering and for 2-D visualization coordinates.
 - HDBSCAN: A density-based clustering algorithm that can discover clusters of
   different densities and label outliers as noise.
-- FAISS: A fast similarity-search library used here for local nearest-neighbor
-  inspection.
+- FAISS: A fast similarity-search library used here for persisted per-topic
+  indexes and dashboard nearest-neighbor evidence.
 - TF-IDF: A sparse bag-of-words representation based on word importance in a
   corpus.
 - KMeans: A centroid-based clustering baseline.
