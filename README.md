@@ -6,6 +6,8 @@ parquet-backed Streamlit dashboard.
 
 Start here:
 
+- [Project report (PDF)](docs/Project_5_Report.pdf) - full written report in
+  PDF form.
 - [Pipeline guide](docs/PIPELINE_GUIDE.md) - detailed architecture and
   stage-by-stage data flow.
 - [Report figures guide](report/figures/FIGURES.md) - generated figures, source
